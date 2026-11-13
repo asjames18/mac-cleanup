@@ -1,0 +1,9 @@
+# History job lifecycle
+
+History refresh, older-page assessment, restore review and Finder-location reads share a cancelable background read lifecycle. A 25-second watchdog stops the loading indicator and explains that the filesystem has not returned. Cancellation retains an active-worker gate, preventing another History read or restore from starting until that worker actually exits. Completion checks discard canceled/late results. Parent task cancellation and leaving History cancel reads; no result can reopen a canceled confirmation sheet.
+
+The History view exposes Cancel during reads, shows progress during reads and confirmed restore, disables actions while a worker is outstanding, and distinguishes a load failure from an empty history. Existing rows remain visible after a failed/canceled refresh. Actual confirmed restore mutation is deliberately outside this read-cancellation lifecycle and remains protected by the existing durable journal and exclusive destination checks. This change does not claim to interrupt a blocked kernel filesystem call or resolve the previously recorded real Trash access limitation.
+
+Validation: three new deterministic job tests use an injected blocking reader/reviewer to exercise timeout, retry gating, caller cancellation and suppression of late confirmation. The restore-review fixture is generated in a temporary directory; no personal file or actual Finder Trash item is moved. Existing History fixture restore and 401-record pagination tests also pass.
+
+After the final UI change, `swift test --filter 'History(Job|Restore)Tests'` passed all five targeted tests with zero skips or failures. `./script/build_and_run.sh --verify` built the release and reopened MacSweep; `codesign --verify --deep --strict build/MacSweep.app` passed. This is local ad-hoc build verification, not distribution certification.

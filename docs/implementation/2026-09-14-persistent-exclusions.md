@@ -1,0 +1,11 @@
+# Persistent exclusions
+
+Settings now supports adding and removing excluded files or folders. Exclusions persist alongside custom scan folders and preset. Changing exclusions clears prior cleanup/storage/related-file results and selections so they cannot describe an obsolete scope. Settings changes are disabled while a scan, removal or outstanding filesystem worker is active.
+
+Every AppModel detached scan, preflight and cleanup job captures an immutable exclusion list in task-local context. Cleanup protection rejects excluded paths, their descendants, and whole-folder removal targets that contain an excluded path. Installed-app removal uses the same policy, including its visible restriction message. The final journaled Trash boundary rechecks exclusions and will not invoke the mover for an overlapping target. Scan summaries identify active exclusions; overlapping candidates are omitted. Restore remains a separate explicit recovery operation.
+
+Exclusions are path-based. They do not follow renamed files, alternative hard-link paths, or filesystem aliases. Case-insensitive comparison is conservative on case-sensitive volumes. Protecting an ancestor candidate can omit unrelated siblings inside that candidate; this avoids offering a whole folder that includes a protected descendant. More precise tree traversal, identity-following exclusions and per-provider coverage counts remain future work.
+
+New regression tests exercise excluded downloads versus permitted siblings, protection of a containing folder, final mover rejection before journaling, task-local isolation, persisted preferences reaching detached jobs, and changes rejected while busy. The initial persistence test exposed trailing-slash URL inequality; removal now compares normalized paths for both exclusions and custom folders. Generated fixtures and isolated UserDefaults suites are used; no personal files are deleted.
+
+Verification: `swift test` passed 145 tests with six optional integration checks skipped, 151 discovered, zero failures. `./script/build_and_run.sh --verify` rebuilt the release and reopened MacSweep; `codesign --verify --deep --strict build/MacSweep.app` passed. These results do not certify the full suite, distribution signing, identity-following exclusions or previously blocked real Trash integration.
