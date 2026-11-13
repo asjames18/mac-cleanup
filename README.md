@@ -5,6 +5,7 @@ A local-first cleaner and system monitor for Mac.
 [![Latest release](https://img.shields.io/github/v/release/asjames18/mac-cleanup)](https://github.com/asjames18/mac-cleanup/releases/latest)
 ![macOS 13+](https://img.shields.io/badge/macOS-13%2B-000000?logo=apple&logoColor=white)
 ![Universal](https://img.shields.io/badge/universal-arm64%20%2B%20x86__64-555555)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ## Overview
 
@@ -103,7 +104,7 @@ That builds a universal (arm64 + x86_64), ad-hoc-signed `build/MacSweep.app`. Se
 
 ## License
 
-This repository does not currently include a LICENSE file.
+This project is licensed under the [MIT License](LICENSE). Copyright (c) 2026 Antonio James.
 
 ## Made by
 
