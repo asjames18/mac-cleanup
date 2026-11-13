@@ -21,6 +21,12 @@ MacSweep is a native SwiftUI app for scanning storage, reviewing caches and left
 - **Menu bar** helper that shares live CPU, memory, and disk readings. Optional smart nudges are limited to three banners a day and stay quiet overnight (10 PM to 8 AM by default). You can also register MacSweep to launch at login.
 - **Optional AI recommendations** are off by default. Nothing leaves the Mac unless you turn them on.
 
+## Screenshots
+
+| Overview | Smart Scan results |
+| --- | --- |
+| ![MacSweep Overview with Mac health, Smart Scan, smart nudges and live storage, CPU and memory](docs/screenshot-overview.png) | ![Smart Scan results showing large and old downloads to review, with why each was found](docs/screenshot-scan-results.png) |
+
 ## Download
 
 Get MacSweep 2.0 from the [latest GitHub release](https://github.com/asjames18/mac-cleanup/releases/latest), or from the [Melanated in Tech apps page](https://melanatedintech.com/apps).
