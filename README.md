@@ -1,76 +1,110 @@
 # MacSweep
 
-A native macOS cleanup and monitoring suite built with SwiftUI. Targets macOS 13 or newer; runtime verification so far is limited to the local macOS 26.6 Intel Mac. No account, network service, or third-party dependency is needed.
+A local-first cleaner and system monitor for Mac.
 
-## Use the app
+[![Latest release](https://img.shields.io/github/v/release/asjames18/mac-cleanup)](https://github.com/asjames18/mac-cleanup/releases/latest)
+![macOS 13+](https://img.shields.io/badge/macOS-13%2B-000000?logo=apple&logoColor=white)
+![Universal](https://img.shields.io/badge/universal-arm64%20%2B%20x86__64-555555)
 
-Open `build/MacSweep.app`, or use Codex's **Run** action. The initial dashboard shows live CPU use, estimated memory use, kernel memory pressure, and available space on your home volume. The menu bar monitor shares the same readings.
+## Overview
 
-- **Smart Scan:** Quick, Deep, Developer and Duplicates Only presets. Review old downloads, caches, logs, DerivedData, temporary files, large files and duplicate groups. Add custom folders from the toolbar. Filter by category, search, inspect file details, and reveal candidates in Finder.
-- **Storage:** Analyze common folders and selected custom folders, with a size ranking and Finder shortcuts. Counts cover readable, non-protected content and may exclude packages and inaccessible files; this is not a complete accounting of the disk.
-- **Applications:** Discover metadata from `/Applications`, `~/Applications`, and `/System/Applications`, including nested folders up to the disclosed depth limit. Results appear progressively; bundle sizes are labeled Not measured so discovery does not traverse every app. Search apps, find associated support files, and uninstall an app with explicitly selected support files. Running apps, Apple apps, MacSweep itself and symlinked app bundles are blocked. Name matches are suggestions, not proof of ownership; review shared data carefully. Managed app/group containers are shown as unavailable and cannot be selected; whole-container reset/removal is not supported.
-- **Maintenance:** Inspect startup plist definitions from user LaunchAgents and local LaunchAgents/LaunchDaemons. Open Apple's Login Items, Storage, Software Update, Activity Monitor and Disk Utility tools. Definitions do not indicate current running/enabled state and are not an exhaustive login-item inventory.
-- **History:** Review future Trash attempts, their stored destinations, failures and unresolved pending entries. Restore using Finder Trash; older operations are not backfilled.
-- **Settings:** Show or hide the menu bar monitor. Readings refresh every three seconds while the app runs.
+MacSweep is a native SwiftUI app for scanning storage, reviewing caches and leftover files, managing applications, and checking startup items. It is self-contained: no account, no extra software, and no network service is required to use it. Scans never delete files on their own. Every cleanup asks for confirmation first and moves items to the Trash, so you can restore them in Finder.
 
-Quick Scan is separate from storage analysis. It publishes candidates and stage/path progress as work proceeds, with a cooperative budget of 20 seconds or 25,000 examined entries. Deep and other scans allow 300 seconds or 1,000,000 entries. A blocked filesystem call can delay these cooperative limits. An independent 25-second Quick Scan / 305-second file-scan watchdog ends the busy display, retains partial results and explains the pending access wait. Further scans wait until that operation returns. Respond to any macOS folder-access prompt, then retry. Application inventory has a 20-second/25,000-entry budget and independent 25-second timeout; related-file scans have a 305-second watchdog. Limits, cancellation and read errors are reported; incomplete cleanup folders are omitted and partially measured storage roots are labeled.
+## Features
 
-## Cleanup behavior
+- **Smart Scan** with Quick, Deep, Developer, and Duplicates Only presets. Review old downloads, caches, logs, DerivedData, temporary files, large files, and duplicate groups. Add custom folders, filter by category, inspect details, and reveal items in Finder.
+- **Storage** map of common folders and folders you add, ranked by size, with Finder shortcuts. Counts cover readable, non-protected content and may exclude packages and inaccessible files.
+- **Applications** inventory from `/Applications`, `~/Applications`, and `/System/Applications`. Search apps, find associated support files, and uninstall an app with the support files you explicitly select. Running apps, Apple apps, MacSweep itself, and symlinked app bundles are blocked.
+- **Maintenance** view of startup plist definitions from user and local LaunchAgents and LaunchDaemons, plus shortcuts to Apple's Login Items, Storage, Software Update, Activity Monitor, and Disk Utility.
+- **History** of cleanup attempts, stored locally, with restore through Finder Trash.
+- **Menu bar** helper that shares live CPU, memory, and disk readings. Optional smart nudges are limited to three banners a day and stay quiet overnight (10 PM to 8 AM by default). You can also register MacSweep to launch at login.
+- **Optional AI recommendations** are off by default. Nothing leaves the Mac unless you turn them on.
 
-Scans never remove files. All candidates start unselected. Each cleanup has a confirmation, uses Finder Trash and reports skipped targets. You can restore items from Trash in Finder. System roots, sensitive user libraries, cloud-storage paths, symbolic links and recently modified cleanup files are protected. A directory containing protected/recent content can be shown for review but is rejected at cleanup time. Internal framework links that resolve inside a selected app bundle are permitted when moving that bundle as a unit; selected links and links outside the bundle remain blocked. Explicit app-support cleanup does not use the recent-file exclusion.
+## Download
 
-Nested selections are counted once. Duplicate groups are matched by logical size and SHA-256, and retain one copy across all categories. The retained copy is rechecked before moving duplicates. Cancellation stops cooperative scanner work and prevents old results from replacing a newer scan. Cleanup candidates now carry device/inode and timestamp snapshots; changed or unverifiable targets are refused at cleanup. This first foundation increment checks target metadata, not a complete directory-descendant snapshot. App uninstall/support paths still use their existing validators. Files can still change between a filesystem check and a Trash operation, so results should be reviewed.
+Get MacSweep 2.0 from the [latest GitHub release](https://github.com/asjames18/mac-cleanup/releases/latest), or from the [Melanated in Tech apps page](https://melanatedintech.com/apps).
 
-macOS controls access to Documents, Desktop, Downloads and other protected locations. Denied or inaccessible locations can reduce scan coverage; use **Activity** to see scan details. No privileged helper, malware detection, forced process termination or automatic “optimization” is included.
+- [MacSweep-2.0-macOS.dmg](https://github.com/asjames18/mac-cleanup/releases/download/v2.0/MacSweep-2.0-macOS.dmg)
+- [MacSweep-2.0-macOS.zip](https://github.com/asjames18/mac-cleanup/releases/download/v2.0/MacSweep-2.0-macOS.zip)
 
-Cleanup history is stored locally under `~/Library/Application Support/MacSweep/History`, with private permissions. An intent must be saved before a move; if that fails, the move is skipped. A pending record can mean the app stopped between moving the file and saving the outcome, so it is never automatically retried. History and folders containing it are protected from cleanup. This first journal supports 10,000 records; storage migration/archival and in-app restore remain development work.
+Checksum files (`.sha256`) are attached to the same release.
 
-## Build and run
+## Install
 
-```sh
-./script/build_and_run.sh
-```
+The download is a universal app (Apple Silicon and Intel) with an ad-hoc signature. It is not notarized, so macOS will block it until you allow it.
 
-This builds a release app, stages `build/MacSweep.app`, signs it locally with an ad-hoc signature, and opens it. Other modes: `--verify`, `--debug`, `--logs`, `--telemetry`. The existing `./scripts/build-app.sh` command builds the bundle without opening it. `CONFIGURATION=debug` can be used for faster iteration.
+1. Open the `.dmg` and drag MacSweep to Applications (or unzip the `.zip` and move the app to Applications).
+2. Open the app from Applications. macOS will say it can't verify the app is free of malware. Click **Done**.
+3. Open **System Settings > Privacy & Security**, scroll to **Security**, and click **Open Anyway** next to MacSweep. Confirm with your password or Touch ID, then click **Open Anyway** again.
+4. The app opens; after that it opens normally.
 
-```sh
-swift test
-```
-
-Tests exercise cleanup protection/selection, identity replacement, scan budgets, incremental results, permission errors, cancellation, native metric calculations, startup plist parsing, and layout of all main destinations. Cleanup tests use temporary fixtures and do not move user data to Trash.
-
-To capture the test app's own windows while running the layout smoke test:
-
-```sh
-MACSWEEP_PREVIEW_DIR="$PWD/build/previews" swift test --filter InterfaceSmokeTests
-```
-
-That optional capture requires macOS screen-capture access for the test process; ordinary tests do not capture the screen.
-
-Explicit read-only diagnostics:
+If Open Anyway does not appear, run this in Terminal:
 
 ```sh
-MACSWEEP_REAL_SCAN=1 swift test --filter ScanResponsivenessTests/testRealQuickScanWhenExplicitlyRequested
-open -n build/MacSweep.app --args --quick-scan
-open -n build/MacSweep.app --args --scan-apps
+xattr -dr com.apple.quarantine /Applications/MacSweep.app
 ```
 
-The first prints local Quick Scan measurements without deleting files. The second opens the app and starts Quick Scan; all candidates remain unselected.
+## Requirements
 
-Development status: [full roadmap](docs/plans/2026-09-12-macsweep-full-development-plan.md), [capability matrix](docs/product/capability-matrix.md), and [scan recovery evidence](docs/implementation/2026-09-12-scan-recovery.md).
+- macOS 13 Ventura or later
+- An Apple Silicon or Intel Mac (the release is a universal binary)
+- No other software is required
+- For fuller scans (including system crash reports and every startup item), grant MacSweep **Full Disk Access** in System Settings > Privacy & Security when asked. MacSweep only reads; it does not change privacy settings itself.
 
-## Local build and distribution
+Tested on an Intel Mac.
 
-This build is for local use. Sharing it broadly requires your Developer ID signing and Apple notarization. MacSweep uses its own name and interface; it does not include CleanMyMac's proprietary technology.
+## Usage
 
-## Free download build (unnotarized)
+Open MacSweep from Applications. The dashboard shows live CPU use, estimated memory use, kernel memory pressure, and available space on your home volume. Use the sidebar to open Smart Scan, Storage, Applications, Maintenance, History, or Settings.
 
-`./scripts/build-app.sh` builds a universal (arm64 + x86_64), ad-hoc-signed `build/MacSweep.app`
-(requires macOS 13 Ventura or later). `./scripts/package-release.sh build/MacSweep.app <version>`
-then writes `build/release/MacSweep-<version>-macOS.zip` and `.dmg` (with an Applications shortcut)
-and prints their SHA-256s.
+Start with a scan, review the candidates (everything starts unselected), then confirm any cleanup. System roots, sensitive user libraries, cloud-storage paths, symbolic links, and recently modified cleanup files are protected. Respond to any macOS folder-access prompt, then retry the scan if a location was skipped.
 
-Installing on macOS 15/26: move MacSweep to Applications and open it. When macOS says it can't
-verify the app, click Done, open System Settings > Privacy & Security, scroll to Security, click
-**Open Anyway** next to MacSweep and confirm with your password. Fallback in Terminal:
-`xattr -dr com.apple.quarantine /Applications/MacSweep.app`.
+## Privacy
+
+MacSweep is local-first. Cleanup history is stored on your Mac under `~/Library/Application Support/MacSweep/History`, with private permissions. There is no account and no required network service. Optional AI recommendations stay off until you enable them; nothing is sent off the Mac unless you turn that on.
+
+## Verify the download
+
+From Terminal, in the folder that contains the file you downloaded:
+
+```sh
+shasum -a 256 MacSweep-2.0-macOS.dmg
+shasum -a 256 MacSweep-2.0-macOS.zip
+```
+
+The SHA-256 values should match the release and the `.sha256` files next to the downloads:
+
+| File | SHA-256 |
+| --- | --- |
+| `MacSweep-2.0-macOS.zip` | `5c2787ed988227e0bccd67e929f4af73328db9c45b6651d7a631a4fb1321dc31` |
+| `MacSweep-2.0-macOS.dmg` | `10a6dc823f02f2086446bf1ec3949097a8c093b10e2f95c6ef187b4b3cc8543a` |
+
+## Build from source
+
+You need macOS 13 or later and a Swift 6 toolchain (this package declares `swift-tools-version: 6.0`).
+
+```sh
+./scripts/build-app.sh
+```
+
+That builds a universal (arm64 + x86_64), ad-hoc-signed `build/MacSweep.app`. Set `UNIVERSAL=0` for a host-only build. To package a `.zip` and `.dmg`:
+
+```sh
+./scripts/package-release.sh build/MacSweep.app 2.0
+```
+
+`./script/build_and_run.sh` builds the app and opens it. Other modes: `--verify`, `--debug`, `--logs`.
+
+## Troubleshooting
+
+- **macOS says the app can't be verified.** Use Open Anyway in System Settings > Privacy & Security, or the `xattr` command in [Install](#install). Right-click > Open is not a reliable workaround on current macOS.
+- **A folder was skipped or a scan looks incomplete.** Approve the macOS folder-access prompt, then scan again. For protected locations, review MacSweep under System Settings > Privacy & Security > Files and Folders or Full Disk Access.
+- **Startup items or crash reports look incomplete.** Grant Full Disk Access as described in [Requirements](#requirements).
+
+## License
+
+This repository does not currently include a LICENSE file.
+
+## Made by
+
+[Antonio James](https://antoniojames.dev) / [Melanated in Tech](https://melanatedintech.com)
