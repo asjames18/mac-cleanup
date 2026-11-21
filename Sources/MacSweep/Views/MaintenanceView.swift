@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct MaintenanceView: View {
+    @ObservedObject var model: AppModel
     @StateObject private var store = MaintenanceStore()
 
     private let columns = [
@@ -15,6 +16,7 @@ struct MaintenanceView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
                     tools
+                    protectionSection
                     definitionsSection
                 }
                 .padding(24)
@@ -22,7 +24,9 @@ struct MaintenanceView: View {
         }
         .frame(minWidth: 780, minHeight: 560)
         .searchable(text: $store.searchText, placement: .toolbar, prompt: "Search definitions")
-        .task { store.refresh() }
+        .task { store.refresh(); model.refreshProtectionStatus() }
+        .onChange(of: store.definitions.map(\.id)) { _ in model.updateStartupDefinitions(store.definitions) }
+        .onChange(of: model.startupSwitchCount) { _ in store.refresh() }
         .onDisappear { store.cancel() }
         .alert(
             "Maintenance",
@@ -83,7 +87,54 @@ struct MaintenanceView: View {
                 ToolCard(title: "Software Update", detail: "Check macOS updates.", icon: "arrow.triangle.2.circlepath", action: store.openSoftwareUpdate)
                 ToolCard(title: "Activity Monitor", detail: "Inspect active processes.", icon: "waveform.path.ecg", action: store.openActivityMonitor)
                 ToolCard(title: "Disk Utility", detail: "Inspect disks and volumes.", icon: "externaldrive", action: store.openDiskUtility)
+                ToolCard(title: "App Store Updates", detail: "Check updates for App Store apps.", icon: "bag", action: store.openAppStoreUpdates)
             }
+        }
+    }
+
+    /// Read-only: Gatekeeper, XProtect, macOS updates and (when you press Check) Homebrew.
+    private var protectionSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Updates & Protection").font(.headline)
+            Text("Read-only. MacSweep reports these; change them in System Settings or Terminal.")
+                .font(.callout).foregroundStyle(.secondary)
+            let status = model.protectionStatus
+            VStack(alignment: .leading, spacing: 8) {
+                statusRow("Gatekeeper", value: status?.gatekeeperOn.map { $0 ? "On" : "Off: apps from anywhere can open without a check" } ?? "Not checked",
+                          good: status?.gatekeeperOn)
+                statusRow("XProtect", value: status.map { s in
+                    guard let version = s.xprotectVersion else { return "Unknown" }
+                    return "Version \(version)" + (s.xprotectAgeDays.map { " · updated \($0) days ago" } ?? "")
+                } ?? "Not checked", good: status?.xprotectAgeDays.map { $0 <= 30 })
+                statusRow("macOS updates", value: status?.pendingMacOSUpdates.map { $0.isEmpty ? "None waiting" : "\($0.count) waiting: \($0.prefix(3).joined(separator: ", "))" } ?? "Unknown",
+                          good: status?.pendingMacOSUpdates.map(\.isEmpty))
+                HStack {
+                    statusRow("Homebrew", value: homebrewText, good: model.homebrewStatus.map { $0.error == nil && $0.outdated.isEmpty })
+                    Button(model.isCheckingHomebrew ? "Checking…" : "Check") { model.checkHomebrew() }
+                        .controlSize(.small).disabled(model.isCheckingHomebrew)
+                        .help("Runs brew outdated with auto-update off. Installs nothing.")
+                }
+            }
+            .padding(14)
+            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
+        }
+    }
+
+    private var homebrewText: String {
+        guard let status = model.homebrewStatus else { return "Press Check to see outdated packages" }
+        guard status.installed else { return "Not installed" }
+        if let error = status.error { return error }
+        if status.outdated.isEmpty { return "Everything is up to date" }
+        return "\(status.outdated.count) outdated: \(status.outdated.prefix(5).joined(separator: ", "))\(status.outdated.count > 5 ? "…" : ""). Run brew upgrade in Terminal."
+    }
+
+    private func statusRow(_ title: String, value: String, good: Bool?) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Image(systemName: good == nil ? "questionmark.circle" : good! ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                .foregroundStyle(good == nil ? Theme.muted : good! ? Theme.ok : Theme.warn)
+            Text(title).font(.callout.weight(.medium)).frame(width: 120, alignment: .leading)
+            Text(value).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
+            Spacer(minLength: 0)
         }
     }
 
@@ -98,7 +149,7 @@ struct MaintenanceView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Text("Read-only startup files in your Library and the Mac’s local Library. This list does not include every login item and does not indicate whether an item is enabled or currently running.")
+            Text("Startup files in your Library and the Mac’s local Library. This list does not include every login item and does not indicate whether an item is enabled or currently running. Items whose program or drive is missing are marked Broken; you can switch off your own broken LaunchAgents (the file moves to the Trash and can be restored from History).")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -129,9 +180,9 @@ struct MaintenanceView: View {
                 } else {
                     LazyVStack(spacing: 0) {
                         ForEach(store.filteredDefinitions) { definition in
-                            DefinitionRow(definition: definition) {
-                                store.reveal(definition)
-                            }
+                            DefinitionRow(definition: definition, busy: model.isBusy || model.waitingForFilesystem,
+                                          reveal: { store.reveal(definition) },
+                                          switchOff: { model.switchOffStartupItem(definition) })
                             Divider().padding(.leading, 48)
                         }
                     }
@@ -203,7 +254,9 @@ private struct ToolCard: View {
 
 private struct DefinitionRow: View {
     let definition: StartupDefinition
+    var busy = false
     let reveal: () -> Void
+    var switchOff: () -> Void = {}
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -222,6 +275,15 @@ private struct DefinitionRow: View {
                         .padding(.horizontal, 7)
                         .padding(.vertical, 3)
                         .background(Color.teal.opacity(0.12), in: Capsule())
+                    if definition.isBroken { Chip(text: "Broken", color: Theme.warn) }
+                }
+
+                if let reason = definition.brokenReason {
+                    Label(reason, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(Theme.warn)
+                    if !definition.canSwitchOff {
+                        Text("In the Mac’s Library: removing it needs an administrator. Reveal it in Finder to decide.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                 }
 
                 Text(definition.label)
@@ -249,11 +311,18 @@ private struct DefinitionRow: View {
 
             Spacer(minLength: 12)
 
-            Button(action: reveal) {
-                Label("Reveal", systemImage: "folder")
+            VStack(alignment: .trailing, spacing: 6) {
+                Button(action: reveal) {
+                    Label("Reveal", systemImage: "folder")
+                }
+                .controlSize(.small)
+                .accessibilityLabel("Reveal \(definition.displayName) plist in Finder")
+                if definition.isBroken && definition.canSwitchOff {
+                    Button("Switch Off…", action: switchOff)
+                        .controlSize(.small).disabled(busy)
+                        .help("Moves this launch file to the Trash after you confirm. Restore it from History.")
+                }
             }
-            .controlSize(.small)
-            .accessibilityLabel("Reveal \(definition.displayName) plist in Finder")
         }
         .padding(14)
     }

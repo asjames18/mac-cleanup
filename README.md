@@ -13,13 +13,17 @@ MacSweep is a native SwiftUI app for scanning storage, reviewing caches and left
 
 ## Features
 
-- **Smart Scan** with Quick, Deep, Developer, and Duplicates Only presets. Review old downloads, caches, logs, DerivedData, temporary files, large files, and duplicate groups. Add custom folders, filter by category, inspect details, and reveal items in Finder.
+- **Smart Scan** with Quick, Deep, Developer, and Duplicates Only presets. Review old downloads, app and browser caches, crash reports, GPU shader caches, app logs older than 30 days, DerivedData, temporary files, large files, and duplicate groups. Developer caches (pip, Yarn, Homebrew, CocoaPods, Swift packages, device support) are opt-in. Add custom folders, filter by category, inspect details, and reveal items in Finder.
+- **Review-only items**: old installers in Downloads (over 30 days) and macOS or iPhone update files are listed with their sizes but never selected or moved.
+- **Space you could free** on the Overview, split into ready to clean, review first, and review only. Every cleanup ends with a summary of what moved, how much space it frees, and what was skipped and why.
+- **Files in use are skipped and listed.** Cloud-only (iCloud placeholder) files are never counted, opened, or downloaded.
+- **Duplicates** with a keep-oldest or keep-newest choice, Select Extra Copies, every copy's path and date, and Reveal in Finder.
 - **Storage** map of common folders and folders you add, ranked by size, with Finder shortcuts. Counts cover readable, non-protected content and may exclude packages and inaccessible files.
 - **Applications** inventory from `/Applications`, `~/Applications`, and `/System/Applications`. Search apps, find associated support files, and uninstall an app with the support files you explicitly select. Running apps, Apple apps, MacSweep itself, and symlinked app bundles are blocked.
-- **Maintenance** view of startup plist definitions from user and local LaunchAgents and LaunchDaemons, plus shortcuts to Apple's Login Items, Storage, Software Update, Activity Monitor, and Disk Utility.
+- **Maintenance** view of startup plist definitions from user and local LaunchAgents and LaunchDaemons. Items whose program or drive is missing are marked Broken, and you can switch off your own broken LaunchAgents (the file moves to the Trash and can be restored from History). Read-only status for Gatekeeper, XProtect, waiting macOS updates, and, when you press Check, outdated Homebrew packages. Shortcuts to Apple's Login Items, Storage, Software Update, App Store updates, Activity Monitor, and Disk Utility.
 - **History** of cleanup attempts, stored locally, with restore through Finder Trash.
 - **Menu bar** helper that shares live CPU, memory, and disk readings. Optional smart nudges are limited to three banners a day and stay quiet overnight (10 PM to 8 AM by default). You can also register MacSweep to launch at login.
-- **Optional AI recommendations** are off by default. Nothing leaves the Mac unless you turn them on.
+- **Suggestions**, off by default. Built-in rules work offline. Optionally, an OpenAI-compatible endpoint (LM Studio, Ollama, OpenRouter) can add picks when you press Ask AI. The AI sees only sizes and counts (no file names or paths), can only choose from MacSweep's own allowlisted actions, and cannot empty the Trash or delete permanently. MacSweep re-checks every pick, uses its own sizes, and asks before every action. Each card shows its source, size, risk, and whether it can be undone. Applied suggestions stay hidden until the next Smart Scan; ones macOS refuses are hidden for 14 days.
 
 ## Screenshots
 
@@ -68,7 +72,7 @@ Start with a scan, review the candidates (everything starts unselected), then co
 
 ## Privacy
 
-MacSweep is local-first. Cleanup history is stored on your Mac under `~/Library/Application Support/MacSweep/History`, with private permissions. There is no account and no required network service. Optional AI recommendations stay off until you enable them; nothing is sent off the Mac unless you turn that on.
+MacSweep is local-first. Cleanup history is stored on your Mac under `~/Library/Application Support/MacSweep/History`, with private permissions. There is no account and no required network service. Suggestions stay off until you enable them, and the built-in rules never use the network. If you pick the OpenAI-compatible provider, MacSweep contacts that endpoint only when you press Ask AI, Test Connection, or Load Models, and sends scan totals only. Paste the API key into Settings and MacSweep saves it in your Mac's Keychain (this Mac only, available while it's unlocked). It is never shown again, logged, or written to MacSweep's settings files; Settings only says whether a key is saved. If you prefer, you can instead name an environment variable that holds the key. Local servers such as LM Studio or Ollama need no key.
 
 ## Verify the download
 

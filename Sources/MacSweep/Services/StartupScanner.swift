@@ -16,6 +16,16 @@ struct StartupDefinition: Identifiable, Sendable {
     let program: String?
     let runAtLoad: Bool?
     let keepAlive: String?
+    /// Why it cannot start (missing program or drive), or nil when it looks fine or cannot be judged.
+    var brokenReason: String? = nil
+
+    var isBroken: Bool { brokenReason != nil }
+
+    /// Only your own LaunchAgents can be switched off without an administrator password.
+    var canSwitchOff: Bool { source == .userLaunchAgents }
+
+    /// A short identifier for suggestions. Uses the label, not the file path, so no folder names leave the Mac.
+    var suggestionKey: String { "\(source == .userLaunchAgents ? "user" : source == .localLaunchAgents ? "agent" : "daemon"):\(label)" }
 }
 
 struct StartupScanResult: Sendable {
@@ -94,7 +104,7 @@ enum StartupScanner {
         )
     }
 
-    private static func readDefinition(
+    static func readDefinition(
         at url: URL,
         source: StartupDefinition.Source
     ) throws -> StartupDefinition? {
@@ -128,8 +138,26 @@ enum StartupScanner {
             source: source,
             program: program,
             runAtLoad: dictionary["RunAtLoad"] as? Bool,
-            keepAlive: describeKeepAlive(dictionary["KeepAlive"])
+            keepAlive: describeKeepAlive(dictionary["KeepAlive"]),
+            brokenReason: brokenReason(program: program)
         )
+    }
+
+    /// Checks the real target. Only absolute paths are judged; a bare command name (found on PATH) is left alone.
+    static func brokenReason(program: String?, fileManager: FileManager = .default) -> String? {
+        guard let program, program.hasPrefix("/") else { return nil }
+        let parts = program.split(separator: "/").map(String.init)
+        if parts.count >= 2, parts[0] == "Volumes" {
+            let volume = "/Volumes/\(parts[1])"
+            var isDirectory: ObjCBool = false
+            if !fileManager.fileExists(atPath: volume, isDirectory: &isDirectory) || !isDirectory.boolValue {
+                return "The drive “\(parts[1])” it starts from isn't connected."
+            }
+        }
+        if !fileManager.fileExists(atPath: program) {
+            return "The program it starts is missing (\(URL(fileURLWithPath: program).lastPathComponent))."
+        }
+        return nil
     }
 
     private static func describeKeepAlive(_ value: Any?) -> String? {
@@ -144,4 +172,47 @@ enum StartupScanner {
 private extension String {
     var nonEmpty: String? { isEmpty ? nil : self }
     var lastPathComponent: String { URL(filePath: self).lastPathComponent }
+}
+
+/// Switches off a broken LaunchAgent by moving its launch file to the Trash through the journaled cleanup path,
+/// so it can be restored from History. Re-checks everything just before the move.
+enum StartupSwitch {
+    static var userLaunchAgents: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/LaunchAgents", isDirectory: true)
+    }
+
+    /// Returns the result and whether macOS refused the move (so the suggestion can be hidden for 14 days).
+    static func switchOff(_ definition: StartupDefinition, launchAgents: URL = userLaunchAgents,
+                          journal: CleanupJournal = CleanupSafety.defaultJournal,
+                          mover: (URL) throws -> URL? = CleanupSafety.finderTrash) -> (CleanupSafety.TrashResult, Bool) {
+        let url = definition.url
+        func skipped(_ reason: String, refused: Bool = false) -> (CleanupSafety.TrashResult, Bool) {
+            (CleanupSafety.TrashResult(messages: ["Skipped \(url.path): \(reason)"]), refused)
+        }
+        guard definition.canSwitchOff, url.pathExtension.lowercased() == "plist",
+              ProtectionRules.normalizedPath(url.deletingLastPathComponent()).lowercased() == ProtectionRules.normalizedPath(launchAgents).lowercased(),
+              !ProtectionRules.hasSymlinkComponent(url) else {
+            return skipped("Only launch files in your own LaunchAgents folder can be switched off.")
+        }
+        func stillBroken() throws {
+            let fresh: StartupDefinition?
+            do { fresh = try StartupScanner.readDefinition(at: url, source: .userLaunchAgents) }
+            catch { throw CleanupSafety.Rejection.changedSinceScan }
+            guard let fresh, fresh.label == definition.label, fresh.isBroken else {
+                throw CleanupSafety.Rejection.unavailable("It is no longer broken or has changed; refresh Maintenance.")
+            }
+        }
+        do {
+            try stillBroken()
+            try CleanupSafety.validate(url, protectRecentFiles: false)
+        } catch { return skipped(error.localizedDescription) }
+        guard FileManager.default.isDeletableFile(atPath: url.path) else {
+            return skipped("macOS does not allow MacSweep to move this file.", refused: true)
+        }
+        let result = CleanupSafety.moveWithJournal(url, journal: journal, revalidate: { try stillBroken() }, mover: mover)
+        let refused = result.moved.isEmpty && result.messages.contains {
+            $0.localizedCaseInsensitiveContains("permission") || $0.localizedCaseInsensitiveContains("not permitted")
+        }
+        return (result, refused)
+    }
 }

@@ -30,6 +30,15 @@ final class AppModel: ObservableObject {
         didSet { saveScanPreferences() }
     }
     @Published var focusedItemID: CleanupItem.ID?
+    /// Which copy of each duplicate group is protected. Changing it re-checks the selection.
+    @Published var duplicateKeep: CleanupSafety.DuplicateKeep = .oldest {
+        didSet { if oldValue != duplicateKeep { enforceSelection(); rebuildSuggestions() } }
+    }
+    /// Opt-in: scan package and tool caches (pip, Yarn, Homebrew, CocoaPods, device support). The Developer preset always does.
+    @Published var includeDeveloperCaches = false {
+        didSet { scanPreferences?.defaults.set(includeDeveloperCaches, forKey: Self.developerCachesKey) }
+    }
+    static let developerCachesKey = "scan.includeDeveloperCaches.v1"
     @Published var toast: Toast?
     /// The confirm sheet currently shown, if any.
     @Published private(set) var pendingConfirmation: PendingConfirmation?
@@ -90,6 +99,7 @@ final class AppModel: ObservableObject {
         } else {
             sandboxEnabled = sandboxPreferences?.load() ?? true
         }
+        includeDeveloperCaches = scanPreferences?.defaults.bool(forKey: Self.developerCachesKey) ?? false
         if let saved = scanPreferences?.load() {
             excludedFolders = saved.exclusions
             customFolders = saved.folders
@@ -123,8 +133,10 @@ final class AppModel: ObservableObject {
     }
 
     var selectedItems: [CleanupItem] {
-        CleanupSafety.selection(items)
+        CleanupSafety.selection(items, keep: duplicateKeep)
     }
+
+    var spaceBreakdown: SpaceBreakdown { SpaceBreakdown.compute(items, keep: duplicateKeep) }
 
     var totalSize: Int64 {
         CleanupSafety.uniqueItems(items).reduce(0) { $0 + $1.size }
@@ -180,13 +192,18 @@ final class AppModel: ObservableObject {
         status = .scanning(storageOnly ? "Analyzing Storage" : "Running \(selectedPreset.title)")
         logText = "Starting scan..."
         if storageOnly { storageItems = [] }
-        else { items = []; lastScanDate = nil; focusedItemID = nil; selectedCategory = nil }
+        else {
+            items = []; lastScanDate = nil; focusedItemID = nil; selectedCategory = nil
+            // A new Smart Scan brings back applied suggestions and drops the last AI picks.
+            appliedSuggestions = []; aiProposals = []; aiStatus = nil
+        }
 
         let customFolders = customFolders
         let selectedPreset = selectedPreset
         let token = beginScan()
         activeFileWorkerToken = token
         let scanner = cleanerScan
+        let options = CleanerOptions.live(includeDeveloperCaches: includeDeveloperCaches)
         let updates: @Sendable (ScanUpdate) -> Void = { [weak self] update in
             Task { @MainActor [weak self] in
                 guard let self, self.generation == token, self.isBusy else { return }
@@ -198,7 +215,7 @@ final class AppModel: ObservableObject {
         let worker = detachedWithExclusions(priority: .userInitiated) {
             if storageOnly { return CleanerScanner.analyzeStorage(customFolders: customFolders, progress: updates) }
             if let scanner { return scanner(customFolders, selectedPreset) }
-            return CleanerScanner.scan(customFolders: customFolders, preset: selectedPreset, progress: updates)
+            return CleanerScanner.scan(customFolders: customFolders, preset: selectedPreset, options: options, progress: updates)
         }
         cancelWorker = { worker.cancel() }
         let timeout = scanTimeout ?? .seconds(!storageOnly && selectedPreset == .quick ? 25 : 305)
@@ -223,6 +240,11 @@ final class AppModel: ObservableObject {
             scanSummary = report.coverageSummary + exclusionSummary
             logText = report.messages.joined(separator: "\n")
             showToast(storageOnly ? "Storage analysis finished." : "Scan finished: \(items.count) candidates to review.", kind: .ok)
+            if !storageOnly {
+                rebuildSuggestions()
+                // The real app also re-reads startup items and protection status; scripted runs stay on fixtures.
+                if confirmation == nil && Bundle.main.bundleURL.pathExtension == "app" { refreshSuggestions() }
+            }
         }
     }
 
@@ -508,15 +530,150 @@ final class AppModel: ObservableObject {
         NSWorkspace.shared.activateFileViewerSelecting([root])
     }
 
-    // MARK: AI (dormant stub, off by default, no network)
+    // MARK: Suggestions (off by default). Built-in rules work offline; the AI is asked only when you press Ask AI.
 
     @Published private(set) var aiSettings: AISettings = .dormant
+    /// Visible suggestion cards, after hiding applied and refused ones.
+    @Published private(set) var suggestionCards: [SuggestionCard] = []
+    /// How many suggestions are hidden (applied since the last Smart Scan, or refused by macOS in the last 14 days).
+    @Published private(set) var hiddenSuggestionCount = 0
+    @Published private(set) var isAskingAI = false
+    /// One line about the last AI request: model and time, or why the built-in rules are shown instead.
+    @Published private(set) var aiStatus: String?
+    @Published private(set) var startupDefinitions: [StartupDefinition] = []
+    @Published private(set) var protectionStatus: ProtectionStatus?
+    @Published private(set) var homebrewStatus: HomebrewStatus?
+    @Published private(set) var isCheckingHomebrew = false
 
-    var aiRecommendations: [AIRecommendation] {
-        AIRecommender.recommendations(settings: aiSettings, items: items)
+    /// Applied suggestions stay hidden until the next Smart Scan.
+    private var appliedSuggestions: Set<String> = []
+    /// The last AI picks, kept until the next scan so an Apply does not throw the list away or re-ask the AI.
+    private var aiProposals: [SuggestionProposal] = []
+    private lazy var skipList: SuggestionSkipList = {
+        guard let root = settingsStore?.store.root else { return SuggestionSkipList() }
+        return SuggestionSkipList.load(from: root)
+    }()
+    /// Tests swap these so they never reach the network, read the real environment, or touch the login Keychain.
+    var aiTransport: any AITransport = LiveAITransport()
+    var aiEnvironment: [String: String] = ProcessInfo.processInfo.environment
+    var aiKeyStore: any AIKeyStore = AIKeyStores.live()
+    /// Whether a key is saved in the Keychain. Only this yes/no is ever shown, never the key.
+    @Published private(set) var aiKeySaved = false
+
+    var aiClient: AIClient { makeAIClient(aiSettings) }
+
+    private func makeAIClient(_ settings: AISettings) -> AIClient {
+        AIClient(settings: settings, transport: aiTransport, environment: aiEnvironment, keyStore: aiKeyStore)
     }
 
-    /// Validates and saves. Rejects key values; only an environment variable name is stored.
+    func refreshAIKeyStatus() { aiKeySaved = aiKeyStore.hasKey() }
+
+    /// Saves or replaces the key in the Keychain. The value is never logged or shown; returns an error message or nil.
+    @discardableResult
+    func saveAIKey(_ key: String) -> String? {
+        do { try aiKeyStore.save(key) }
+        catch {
+            let message = error.localizedDescription
+            showToast(message, kind: .danger)
+            return message
+        }
+        let replaced = aiKeySaved
+        refreshAIKeyStatus()
+        recordAction("ai", replaced ? "AI key replaced in the Keychain." : "AI key saved in the Keychain.")
+        showToast(replaced ? "Key replaced in the Keychain." : "Key saved in the Keychain.", kind: .ok)
+        return nil
+    }
+
+    @discardableResult
+    func removeAIKey() -> String? {
+        do { try aiKeyStore.remove() }
+        catch {
+            let message = error.localizedDescription
+            showToast(message, kind: .danger)
+            return message
+        }
+        refreshAIKeyStatus()
+        recordAction("ai", "AI key removed from the Keychain.")
+        showToast("Key removed from the Keychain.", kind: .ok)
+        return nil
+    }
+
+    var suggestionContext: SuggestionContext {
+        SuggestionContext(items: items, keep: duplicateKeep, startup: startupDefinitions, protection: protectionStatus,
+                          homebrewOutdated: homebrewStatus.flatMap { $0.installed && $0.error == nil ? $0.outdated.count : nil })
+    }
+
+    /// Rebuilds the cards from MacSweep's own data plus the last AI picks. Never contacts the AI.
+    func rebuildSuggestions() {
+        guard aiSettings.enabled else { suggestionCards = []; hiddenSuggestionCount = 0; return }
+        skipList.prune(now: now())
+        let all = SuggestionEngine.cards(suggestionContext, ai: aiSettings.provider == .openai ? aiProposals : [])
+        let visible = SuggestionFilter.visible(all, applied: appliedSuggestions, skip: skipList, now: now())
+        suggestionCards = visible.cards
+        hiddenSuggestionCount = visible.hidden
+    }
+
+    /// Refresh: re-reads startup items and protection status (read-only, in the background), then rebuilds the cards.
+    func refreshSuggestions() {
+        guard aiSettings.enabled else { return }
+        Task {
+            let (startup, protection) = await Task.detached(priority: .utility) {
+                ((try? StartupScanner.scan())?.definitions ?? [], ProtectionStatus.read())
+            }.value
+            startupDefinitions = startup
+            protectionStatus = protection
+            rebuildSuggestions()
+        }
+    }
+
+    func updateStartupDefinitions(_ definitions: [StartupDefinition]) {
+        startupDefinitions = definitions
+        rebuildSuggestions()
+    }
+
+    /// Asks the configured OpenAI-compatible endpoint. Only on request, only when on and that provider is picked.
+    /// Sends the compact snapshot (sizes and counts, no file names). Falls back to the built-in rules on any error.
+    func askAI() async {
+        guard aiSettings.enabled, aiSettings.provider == .openai, !isAskingAI else { return }
+        isAskingAI = true
+        defer { isAskingAI = false }
+        let client = aiClient
+        let snapshot = SuggestionEngine.snapshot(suggestionContext)
+        recordAction("ai", "Asked \(aiSettings.model.isEmpty ? "the AI" : aiSettings.model) for suggestions (\(snapshot.count) bytes of scan totals, no file names).")
+        do {
+            let result = try await client.suggestions(snapshot: snapshot)
+            aiProposals = result.proposals
+            let caps = SuggestionEngine.capabilities(suggestionContext)
+            let accepted = result.proposals.filter { caps.validate($0.action) != nil }.count
+            aiStatus = "Asked \(result.model) in \(String(format: "%.1f", result.seconds)) s\(result.jsonMode ? "" : " (no JSON mode)"): \(accepted) of \(result.proposals.count) picks passed MacSweep's checks."
+            recordAction("ai", "AI answered in \(String(format: "%.1f", result.seconds)) s with \(result.proposals.count) picks; \(accepted) passed validation.")
+        } catch {
+            let message = client.scrub(error.localizedDescription)
+            aiStatus = "The AI didn't answer (\(message)) Showing the built-in rules."
+            recordAction("ai", "AI request failed: \(message)")
+        }
+        rebuildSuggestions()
+    }
+
+    func testAIConnection(_ draft: AISettings) async -> AIConnectionReport {
+        let client = makeAIClient(draft)
+        let report = await client.testConnection()
+        recordAction("ai", "Connection test: \(report.ok ? "ok" : "failed") in \(String(format: "%.2f", report.seconds)) s.")
+        return report
+    }
+
+    func loadAIModels(_ draft: AISettings) async -> Result<[String], AIError> {
+        let client = makeAIClient(draft)
+        do { return .success(try await client.models()) }
+        catch let error as AIError { return .failure(error) }
+        catch { return .failure(.network(client.scrub(error.localizedDescription))) }
+    }
+
+    func aiKeyFound(_ draft: AISettings) -> Bool {
+        makeAIClient(draft).keyFound
+    }
+
+    /// Validates and saves. Rejects key values; the key itself lives only in the Keychain.
     @discardableResult
     func saveAISettings(_ draft: AISettings) -> String? {
         let valid: AISettings
@@ -528,37 +685,132 @@ final class AppModel: ObservableObject {
         }
         do { try settingsStore?.update(reason: "ai-settings") { $0.ai = valid } }
         catch { return "Could not save settings: \(error.localizedDescription)" }
+        if valid.provider != aiSettings.provider || valid.model != aiSettings.model || valid.baseURL != aiSettings.baseURL {
+            aiProposals = []; aiStatus = nil
+        }
         aiSettings = valid
-        recordAction("ai", "AI settings saved: \(valid.enabled ? "on" : "off"), provider \(valid.provider.rawValue), key variable \(valid.keyEnv.isEmpty ? "none" : valid.keyEnv).")
-        showToast(valid.enabled ? "AI suggestions on (local rules, no network)." : "AI suggestions off.", kind: .ok)
+        recordAction("ai", "AI settings saved: \(valid.enabled ? "on" : "off"), provider \(valid.provider.rawValue), fallback key variable \(valid.keyEnv.isEmpty ? "none" : valid.keyEnv), timeout \(valid.timeoutSeconds) s.")
+        showToast(!valid.enabled ? "Suggestions off." : valid.provider == .rules ? "Suggestions on (built-in rules, no network)."
+                  : "Suggestions on. The AI is asked only when you press Ask AI.", kind: .ok)
+        rebuildSuggestions()
         return nil
     }
 
-    /// Every AI Apply asks "Do you really want to do this action?" first, then runs the normal cleanup checks.
+    /// After an approved Apply: a card that did its job is hidden until the next Smart Scan; one macOS refused
+    /// is hidden for 14 days (remembered in rec-skip.json). Only that card changes; the rest of the list stays.
+    func recordSuggestionOutcome(_ card: SuggestionCard, applied: Bool, refused: Bool) {
+        if applied {
+            appliedSuggestions.insert(card.id)
+        } else if refused {
+            skipList.refuse(card.id, now: now())
+            if let root = settingsStore?.store.root { try? skipList.save(to: root) }
+            recordAction("ai", "macOS refused \(card.title); hidden for \(SuggestionSkipList.hideDays) days.")
+        }
+        rebuildSuggestions()
+    }
+
+    /// Every Apply re-validates the card against MacSweep's own scan, then asks "Do you really want to do this action?".
+    /// Applying one removes just that card. Review cards only open a section.
     @discardableResult
-    func applyAIRecommendation(_ recommendation: AIRecommendation) -> Bool {
+    func applySuggestion(_ card: SuggestionCard) -> Bool {
         guard aiSettings.enabled, !isBusy, !waitingForFilesystem else { return false }
-        guard case .moveToTrash(let urls) = recommendation.action else { return false }
-        let targets = CleanupSafety.uniqueURLs(urls)
-        guard !targets.isEmpty else { return false }
-        let sizes = Dictionary(items.map { ($0.url.path, $0.size) }, uniquingKeysWith: { first, _ in first })
-        recordAction("ai", "Apply requested: \(recommendation.title).")
-        requestConfirmation(summary: "AI suggestion: \(recommendation.title)", detail: recommendation.detail + " Suggested by local rules; review every item.",
-                            urls: targets, sizes: sizes, reversible: recommendation.reversible) { [self] grant in
-            guard !isBusy, !waitingForFilesystem, grant.matches(targets.map(\.path)) else { return }
-            let scanItems = items
-            let running = NSWorkspace.shared.runningApplications.compactMap(\.bundleURL)
-            let selfURL = Bundle.main.bundleURL
+        let context = suggestionContext
+        guard let action = SuggestionEngine.capabilities(context).validate(card.action) else {
+            showToast("That suggestion no longer matches the scan. Refresh suggestions.", kind: .warn)
+            rebuildSuggestions()
+            return false
+        }
+        switch action {
+        case .review(let tab):
+            openReview(ReviewTab(rawValue: tab))
+            return true
+        case .disableStartupItem(let key):
+            guard let definition = context.startup.first(where: { $0.suggestionKey == key }) else { return false }
+            return switchOffStartupItem(definition, card: card)
+        case .trashCategory, .trashDuplicateCopies:
+            let targets = SuggestionEngine.targets(action, context)
+            guard !targets.isEmpty else { return false }
+            let sizes = Dictionary(items.map { ($0.url.path, $0.size) }, uniquingKeysWith: { first, _ in first })
+            recordAction("ai", "Apply requested: \(card.title) (\(card.source.label)).")
+            let source = card.source == .rules ? "MacSweep's built-in rules" : "the AI, checked against MacSweep's own scan"
+            requestConfirmation(summary: "Suggestion: \(card.title)", detail: "\(card.reason) Suggested by \(source). Review every item.",
+                                urls: targets, sizes: sizes, reversible: card.facts.reversible) { [self] grant in
+                guard !isBusy, !waitingForFilesystem, grant.matches(targets.map(\.path)) else { return }
+                runTrash(grant) { [self] result in
+                    recordSuggestionOutcome(card, applied: !result.moved.isEmpty, refused: false)
+                }
+            }
+            return true
+        }
+    }
+
+    func openReview(_ tab: ReviewTab?) {
+        switch tab {
+        case .maintenance: mainViewMode = .maintenance
+        case .storage: mainViewMode = .storage
+        case .duplicates: mainViewMode = .cleanup; selectedCategory = .duplicates
+        case .largeFiles: mainViewMode = .cleanup; selectedCategory = .largeFiles
+        case .oldInstallers: mainViewMode = .cleanup; selectedCategory = .oldInstallers
+        case .updateFiles: mainViewMode = .cleanup; selectedCategory = .systemUpdates
+        case nil: break
+        }
+        focusedItemID = visibleItems.first?.id
+    }
+
+    /// Switches off a broken LaunchAgent by moving its launch file to the Trash (restorable from History or the Trash).
+    /// Only your own LaunchAgents qualify, only while the item is still broken, and only after you confirm.
+    @discardableResult
+    func switchOffStartupItem(_ definition: StartupDefinition, card: SuggestionCard? = nil) -> Bool {
+        guard !isBusy, !waitingForFilesystem, definition.canSwitchOff, definition.isBroken else { return false }
+        let url = definition.url
+        recordAction("startup", "Switch off requested: \(definition.displayName).")
+        requestConfirmation(summary: "Switch off \(definition.displayName)",
+                            detail: "\(definition.brokenReason ?? "") Moves its launch file to the Trash so it stops trying to start at login. Restore it from History or the Trash.",
+                            urls: [url], actionTitle: "Switch Off", reversible: true) { [self] grant in
+            guard !isBusy, !waitingForFilesystem, grant.matches([url.path]) else { return }
             status = .cleaning
+            let exclusions = excludedFolders, sandbox = sandboxPolicy
             Task {
-                let result = await detachedWithExclusions(priority: .userInitiated) {
-                    CleanupSafety.trash(grant, allItems: scanItems, runningURLs: running, selfURL: selfURL)
+                let (result, refused) = await Task.detached(priority: .userInitiated) { () -> (CleanupSafety.TrashResult, Bool) in
+                    TestSandbox.$policy.withValue(sandbox) {
+                        ProtectionRules.$excludedURLs.withValue(exclusions) {
+                            StartupSwitch.switchOff(definition)
+                        }
+                    }
                 }.value
-                items.removeAll { item in result.moved.contains { ProtectionRules.contains($0, item.url) } }
-                finishTrash(result)
+                status = .complete
+                startupDefinitions.removeAll { ProtectionRules.contains(url, $0.url) && !result.moved.isEmpty }
+                appendLog(result.messages.joined(separator: "\n"))
+                for message in result.messages { recordAction("startup", message) }
+                if let card { recordSuggestionOutcome(card, applied: !result.moved.isEmpty, refused: refused) }
+                showToast(result.moved.isEmpty ? "\(definition.displayName) was not switched off." : "\(definition.displayName) switched off. Restore it from History if needed.",
+                          kind: result.moved.isEmpty ? .warn : .ok)
+                presentReport(result, freed: nil)
+                startupSwitchCount += 1
             }
         }
         return true
+    }
+
+    /// Bumped after a startup item is switched off so the Maintenance list refreshes.
+    @Published private(set) var startupSwitchCount = 0
+
+    func refreshProtectionStatus() {
+        Task {
+            protectionStatus = await Task.detached(priority: .utility) { ProtectionStatus.read() }.value
+            rebuildSuggestions()
+        }
+    }
+
+    /// Runs `brew outdated` only when asked. Read-only.
+    func checkHomebrew() {
+        guard !isCheckingHomebrew else { return }
+        isCheckingHomebrew = true
+        Task {
+            homebrewStatus = await Task.detached(priority: .utility) { HomebrewStatus.check() }.value
+            isCheckingHomebrew = false
+            rebuildSuggestions()
+        }
     }
 
     func revealActionLog() {
@@ -645,7 +897,7 @@ final class AppModel: ObservableObject {
 
     func toggleItem(_ item: CleanupItem) {
         guard !isBusy, !waitingForFilesystem else { return }
-        guard let index = items.firstIndex(where: { $0.id == item.id }) else { return }
+        guard let index = items.firstIndex(where: { $0.id == item.id }), !items[index].category.isReviewOnly else { return }
         items[index].isSelected.toggle()
         enforceSelection()
     }
@@ -800,6 +1052,16 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Keep newest / keep oldest: selects every duplicate except the kept copy of each group. Nothing moves until you confirm.
+    func selectExtraDuplicateCopies() {
+        guard !isBusy, !waitingForFilesystem else { return }
+        let extra = Set(CleanupSafety.extraDuplicateCopies(items, keep: duplicateKeep).map(\.id))
+        for index in items.indices where items[index].category == .duplicates {
+            items[index].isSelected = extra.contains(items[index].id)
+        }
+        enforceSelection()
+    }
+
     func setVisibleSelection(_ isSelected: Bool) {
         guard !isBusy, !waitingForFilesystem else { return }
         let visibleIDs = Set(visibleItems.map(\.id))
@@ -810,9 +1072,9 @@ final class AppModel: ObservableObject {
     }
 
     private func enforceSelection() {
-        let retained = CleanupSafety.retainedCopies(items)
+        let retained = CleanupSafety.retainedCopies(items, keep: duplicateKeep)
         for index in items.indices where items[index].isSelected {
-            if retained.contains(where: { ProtectionRules.contains(items[index].url, $0.url) }) {
+            if items[index].category.isReviewOnly || retained.contains(where: { ProtectionRules.contains(items[index].url, $0.url) }) {
                 items[index].isSelected = false
             }
         }
@@ -825,22 +1087,37 @@ final class AppModel: ObservableObject {
         requestConfirmation(summary: "Move \(targets.count) items to Trash", detail: "Review every target below. Files can be recovered from Finder Trash or History.",
                             urls: targets, sizes: sizes, allowsSandboxSkip: true) { [self] grant in
             guard !isBusy, !waitingForFilesystem else { return }
-            let scanItems = items
-            let running = NSWorkspace.shared.runningApplications.compactMap(\.bundleURL)
-            let selfURL = Bundle.main.bundleURL
-            status = .cleaning
-            Task {
-                let result = await detachedWithExclusions(priority: .userInitiated) {
-                    CleanupSafety.trash(grant, allItems: scanItems, runningURLs: running, selfURL: selfURL)
-                }.value
-                items.removeAll { item in result.moved.contains { ProtectionRules.contains($0, item.url) } }
-                if let selectedCategory, !items.contains(where: { $0.category == selectedCategory }) {
-                    self.selectedCategory = summaries.first?.category
-                }
-                finishTrash(result)
-            }
+            runTrash(grant)
         }
     }
+
+    /// The one Trash path for scan results: same checks, in-use files skipped and listed, then a results summary.
+    private func runTrash(_ grant: ConfirmationGrant, completion: @escaping (CleanupSafety.TrashResult) -> Void = { _ in }) {
+        let scanItems = items
+        let running = NSWorkspace.shared.runningApplications.compactMap(\.bundleURL)
+        let selfURL = Bundle.main.bundleURL
+        let keep = duplicateKeep
+        let checkOpenFiles = confirmation == nil || checksOpenFilesWhenScripted
+        status = .cleaning
+        Task {
+            let result = await detachedWithExclusions(priority: .userInitiated) {
+                CleanupSafety.trash(grant, allItems: scanItems, runningURLs: running, selfURL: selfURL, keep: keep,
+                                    openFiles: checkOpenFiles ? OpenFileIndex.capture() : nil)
+            }.value
+            let freed = scanItems.filter { item in result.moved.contains { ProtectionRules.normalizedPath($0) == ProtectionRules.normalizedPath(item.url) } }
+                .reduce(Int64(0)) { $0 + $1.size }
+            items.removeAll { item in result.moved.contains { ProtectionRules.contains($0, item.url) } }
+            if let selectedCategory, !items.contains(where: { $0.category == selectedCategory }) {
+                self.selectedCategory = summaries.first?.category
+            }
+            finishTrash(result, freed: freed)
+            completion(result)
+            rebuildSuggestions()
+        }
+    }
+
+    /// Scripted runs skip the open-file check unless a test asks for it.
+    var checksOpenFilesWhenScripted = false
 
     private func pathList(_ text: String) -> NSScrollView {
         let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 480, height: 180))
@@ -858,16 +1135,23 @@ final class AppModel: ObservableObject {
         return scroll
     }
 
-    private func finishTrash(_ result: CleanupSafety.TrashResult) {
+    private func finishTrash(_ result: CleanupSafety.TrashResult, freed: Int64? = nil) {
         status = .complete
         appendLog(result.messages.joined(separator: "\n"))
-        recordAction("trash", "Moved \(result.moved.count) items.")
+        recordAction("trash", "Moved \(result.moved.count) items\(freed.map { $0 > 0 ? " (\($0.formattedFileSize))" : "" } ?? "").")
         for message in result.messages { recordAction("trash", message) }
-        showToast(result.moved.isEmpty ? "Nothing was moved to Trash." : "Moved \(result.moved.count) items to Trash.",
+        showToast(result.moved.isEmpty ? "Nothing was moved to Trash."
+                  : "Moved \(result.moved.count) items to Trash\(freed.map { $0 > 0 ? " · \($0.formattedFileSize)" : "" } ?? "").",
                   kind: result.moved.isEmpty ? .warn : .ok)
+        presentReport(result, freed: freed)
+    }
+
+    /// The results summary shown after every Apply: moved, skipped by reason (including files in use), and notes.
+    private func presentReport(_ result: CleanupSafety.TrashResult, freed: Int64?) {
+        lastTrashReport = TrashReport.summarize(movedCount: result.moved.count, messages: result.messages, freedBytes: freed)
         // Scripted runs (an injected confirmation) report through the log and toast only.
         guard confirmation == nil else { return }
-        let report = TrashReport.summarize(movedCount: result.moved.count, messages: result.messages)
+        let report = TrashReport.summarize(movedCount: result.moved.count, messages: result.messages, freedBytes: freed)
         let alert = NSAlert()
         alert.messageText = report.headline
         alert.alertStyle = result.moved.isEmpty ? .warning : .informational
@@ -884,6 +1168,9 @@ final class AppModel: ObservableObject {
         details.runModal()
     }
 
+    /// The last results summary, for tests and the History view.
+    @Published private(set) var lastTrashReport: TrashReport?
+
     private func appendLog(_ message: String) {
         guard !message.isEmpty else { return }
         if logText == "Ready." || logText.isEmpty {
@@ -894,7 +1181,7 @@ final class AppModel: ObservableObject {
     }
 
     private func uniqueSelectedItems() -> [CleanupItem] {
-        CleanupSafety.selection(items)
+        CleanupSafety.selection(items, keep: duplicateKeep)
     }
 
     private func runRemovalPreflight(timeout: Duration = .seconds(25), work: @escaping @Sendable () throws -> Void,

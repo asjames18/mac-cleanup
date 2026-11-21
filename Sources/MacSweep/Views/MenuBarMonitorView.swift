@@ -86,37 +86,95 @@ struct MacSweepSettingsView: View {
                 Button("Add Exclusion…") { model.chooseExcludedFolders() }
             }.disabled(model.isBusy || model.waitingForFilesystem)
             Section("MacSweep") {
-                Text("Version 2.0 · Built for your Mac")
+                Text("Version 2.1 · Built for your Mac")
                 Text("Local scans. No account required.").font(.caption).foregroundStyle(.secondary)
             }
         }.formStyle(.grouped).padding(12).frame(width: 490, height: 610)
     }
 }
 
-/// Off by default. Stores an environment variable name only; this build makes no network calls.
+/// Off by default. The key goes straight into the Keychain and is never shown again; only "Key saved" is displayed.
+/// The AI is contacted only when you press
+/// Ask AI on the Overview, Test Connection or Load Models.
 struct AISettingsSection: View {
     @ObservedObject var model: AppModel
     @State private var draft = AISettings.dormant
     @State private var error: String?
+    @State private var testResult: String?
+    @State private var testing = false
+    @State private var models: [String] = []
+    @State private var keyEntry = ""
 
     var body: some View {
-        Section("AI suggestions (off by default)") {
-            Toggle("Show AI suggestions", isOn: $draft.enabled)
+        Section("Suggestions (off by default)") {
+            Toggle("Show suggestions", isOn: $draft.enabled)
             Picker("Provider", selection: $draft.provider) {
-                Text("Local rules").tag(AISettings.Provider.rules)
-                Text("OpenAI-compatible (not connected)").tag(AISettings.Provider.openai)
+                Text("Built-in rules (no network)").tag(AISettings.Provider.rules)
+                Text("Rules + OpenAI-compatible AI").tag(AISettings.Provider.openai)
             }
-            TextField("Base URL", text: $draft.baseURL)
-            TextField("Model", text: $draft.model)
-            TextField("API key environment variable name", text: $draft.keyEnv)
-            Text("Enter only the variable name, for example OPENROUTER_API_KEY. Key values are rejected. Nothing is sent over the network in this version, and every Apply asks first.")
-                .font(.caption).foregroundStyle(.secondary)
+            if draft.provider == .openai {
+                TextField("Base URL", text: $draft.baseURL)
+                HStack {
+                    TextField("Model", text: $draft.model)
+                    if !models.isEmpty {
+                        Menu("Pick") {
+                            ForEach(models.prefix(200), id: \.self) { id in Button(id) { draft.model = id } }
+                        }.frame(width: 70)
+                    }
+                }
+                HStack {
+                    SecureField(model.aiKeySaved ? "Paste a new key to replace it" : "API key (optional)", text: $keyEntry)
+                    Button(model.aiKeySaved ? "Replace Key" : "Save Key") {
+                        error = model.saveAIKey(keyEntry)
+                        keyEntry = ""
+                    }.disabled(keyEntry.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+                HStack {
+                    Label(model.aiKeySaved ? "Key saved in Keychain" : "No key saved",
+                          systemImage: model.aiKeySaved ? "key.fill" : "key")
+                        .font(.caption).foregroundStyle(model.aiKeySaved ? Theme.ok : Color.secondary)
+                    Spacer()
+                    if model.aiKeySaved { Button("Remove Key", role: .destructive) { error = model.removeAIKey() } }
+                }
+                TextField("Fallback: key environment variable name (optional)", text: $draft.keyEnv)
+                Stepper("Time limit: \(draft.timeoutSeconds) s", value: $draft.timeoutSeconds, in: AISettings.timeoutRange, step: 5)
+                Text("The key is saved in your Mac's Keychain (this Mac only, available while it's unlocked) and is never shown, logged, or written to MacSweep's settings. Local servers (LM Studio, Ollama) need no key. The AI gets scan totals only (sizes and counts, no file names), can only pick MacSweep's own allowlisted actions, and every Apply asks first.")
+                    .font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Button(testing ? "Testing…" : "Test Connection") {
+                        testing = true; testResult = nil
+                        let candidate = draft
+                        Task {
+                            let report = await model.testAIConnection(candidate)
+                            testResult = report.message
+                            testing = false
+                        }
+                    }.disabled(testing)
+                    Button("Load Models") {
+                        testing = true; testResult = nil
+                        let candidate = draft
+                        Task {
+                            switch await model.loadAIModels(candidate) {
+                            case .success(let ids): models = ids; testResult = "\(ids.count) models loaded. Use Pick to choose one."
+                            case .failure(let failure): testResult = failure.localizedDescription
+                            }
+                            testing = false
+                        }
+                    }.disabled(testing)
+                    Spacer()
+                }
+                if let testResult { Text(testResult).font(.caption).foregroundStyle(.secondary).textSelection(.enabled) }
+            } else {
+                Text("Suggestions come from MacSweep's built-in rules. Nothing is sent over the network, and every Apply asks first.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             if let error { Text(error).font(.caption).foregroundStyle(Theme.danger) }
             HStack {
                 Spacer()
-                Button("Save AI Settings") { error = model.saveAISettings(draft) }
+                Button("Save Suggestion Settings") { error = model.saveAISettings(draft) }
             }
         }
-        .onAppear { draft = model.aiSettings }
+        .onAppear { draft = model.aiSettings; model.refreshAIKeyStatus() }
+        .onDisappear { keyEntry = "" }
     }
 }

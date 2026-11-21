@@ -69,7 +69,7 @@ struct TrashReport: Equatable, Sendable {
         return lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    static func summarize(movedCount: Int, messages: [String]) -> TrashReport {
+    static func summarize(movedCount: Int, messages: [String], freedBytes: Int64? = nil) -> TrashReport {
         var order: [String] = []
         var paths: [String: [String]] = [:]
         var other: [String] = []
@@ -82,7 +82,13 @@ struct TrashReport: Equatable, Sendable {
         let skippedCount = groups.reduce(0) { $0 + $1.paths.count }
         let headline = movedCount == 0 ? "Nothing was moved to Trash" : "Moved \(SandboxText.items(movedCount)) to Trash"
         var parts: [String] = []
-        if movedCount > 0 || skippedCount == 0 { parts.append("Moved \(SandboxText.items(movedCount)).") }
+        if movedCount > 0 || skippedCount == 0 {
+            if let freedBytes, movedCount > 0, freedBytes > 0 {
+                parts.append("Moved \(SandboxText.items(movedCount)) (about \(freedBytes.formattedFileSize), freed when you empty the Trash).")
+            } else {
+                parts.append("Moved \(SandboxText.items(movedCount)).")
+            }
+        }
         if skippedCount > 0 {
             let reasons = groups.map { "\($0.paths.count) \(shortReason($0.reason))" }.joined(separator: ", ")
             parts.append("Skipped \(SandboxText.items(skippedCount)): \(reasons).")

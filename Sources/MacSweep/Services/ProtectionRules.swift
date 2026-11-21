@@ -102,7 +102,7 @@ enum ProtectionRules {
         if protectHistory, contains(url, historyDirectory) || contains(historyDirectory, url) { return true }
         // MacSweep's own settings, backups and action log are never cleanup targets.
         let support = historyDirectory.deletingLastPathComponent()
-        for own in ["settings.json", "settings.json.bak", "backups", "logs"].map({ support.appendingPathComponent($0) })
+        for own in ["settings.json", "settings.json.bak", "backups", "logs", "rec-skip.json"].map({ support.appendingPathComponent($0) })
         where contains(url, own) || contains(own, url) { return true }
         let home = FileManager.default.homeDirectoryForCurrentUser
         let path = URL(fileURLWithPath: url.path)
