@@ -46,11 +46,12 @@ enum SystemSignals {
     static var lowPowerMode: Bool { ProcessInfo.processInfo.isLowPowerModeEnabled }
 
     /// Runs a system tool with a hard timeout and returns stdout. Never uses a shell.
-    static func run(_ path: String, _ arguments: [String], timeout: TimeInterval = 10) -> String? {
+    static func run(_ path: String, _ arguments: [String], timeout: TimeInterval = 10, environment: [String: String]? = nil) -> String? {
         guard FileManager.default.isExecutableFile(atPath: path) else { return nil }
         let process = Process()
         process.executableURL = URL(filePath: path)
         process.arguments = arguments
+        if let environment { process.environment = environment }
         let out = Pipe()
         process.standardOutput = out
         process.standardError = FileHandle.nullDevice

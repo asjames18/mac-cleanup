@@ -22,6 +22,16 @@ enum CleanupSafety {
         }
     }
 
+    /// Which copy of each duplicate group is always kept.
+    enum DuplicateKeep: String, CaseIterable, Identifiable, Sendable {
+        case oldest, newest
+        var id: String { rawValue }
+        var title: String { self == .oldest ? "Keep oldest" : "Keep newest" }
+    }
+
+    static let inUseReason = "In use by an open app. Quit the app, then try again."
+    static let reviewOnlyReason = "Review-only item. MacSweep never moves it."
+
     struct TrashResult: Sendable {
         var moved: [URL] = []
         var messages: [String] = []
@@ -87,8 +97,11 @@ enum CleanupSafety {
     }
 
     /// Moves only what the user approved in the confirm sheet. The grant is single use.
-    static func trash(_ grant: ConfirmationGrant, allItems: [CleanupItem] = [], protectRecentFiles: Bool = true, runningURLs: [URL] = [], selfURL: URL = Bundle.main.bundleURL) -> TrashResult {
-        trashApproved(grant.urls, allItems: allItems, protectRecentFiles: protectRecentFiles, runningURLs: runningURLs, selfURL: selfURL)
+    /// `openFiles`, when given, skips (and lists) anything a running app has open.
+    static func trash(_ grant: ConfirmationGrant, allItems: [CleanupItem] = [], protectRecentFiles: Bool = true, runningURLs: [URL] = [],
+                      selfURL: URL = Bundle.main.bundleURL, keep: DuplicateKeep = .oldest, openFiles: OpenFileIndex? = nil) -> TrashResult {
+        trashApproved(grant.urls, allItems: allItems, protectRecentFiles: protectRecentFiles, runningURLs: runningURLs, selfURL: selfURL,
+                      keep: keep, openFiles: openFiles)
     }
 
     static let lastCopyMessage = "This would remove every copy in its duplicate group. Keep at least one copy."
@@ -109,18 +122,28 @@ enum CleanupSafety {
         return blocked
     }
 
-    private static func trashApproved(_ urls: [URL], allItems: [CleanupItem], protectRecentFiles: Bool, runningURLs: [URL], selfURL: URL) -> TrashResult {
+    private static func trashApproved(_ urls: [URL], allItems: [CleanupItem], protectRecentFiles: Bool, runningURLs: [URL], selfURL: URL,
+                                      keep: DuplicateKeep, openFiles: OpenFileIndex?) -> TrashResult {
         var result = TrashResult()
         let unique = uniqueURLs(urls)
         let lastCopy = lastCopyTargets(unique, allItems: allItems)
+        let reviewOnly = allItems.filter(\.category.isReviewOnly).map(\.url)
         for url in unique {
             if lastCopy.contains(ProtectionRules.normalizedPath(url).lowercased()) {
                 result.messages.append("Skipped \(url.path): \(lastCopyMessage)")
                 continue
             }
+            if reviewOnly.contains(where: { ProtectionRules.contains($0, url) || ProtectionRules.contains(url, $0) }) {
+                result.messages.append("Skipped \(url.path): \(reviewOnlyReason)")
+                continue
+            }
+            if let openFiles, openFiles.isInUse(url) {
+                result.messages.append("Skipped \(url.path): \(inUseReason)")
+                continue
+            }
             do {
                 try validate(url, protectRecentFiles: protectRecentFiles, runningURLs: runningURLs, selfURL: selfURL)
-                try validateDuplicates(target: url, allItems: allItems)
+                try validateDuplicates(target: url, allItems: allItems, keep: keep)
                 if !allItems.isEmpty { try validateSnapshot(url, allItems: allItems) }
                 let outcome = moveWithJournal(url, revalidate: {
                     if Task.isCancelled { throw CancellationError() }
@@ -236,19 +259,31 @@ enum CleanupSafety {
         return items.filter { paths.contains(ProtectionRules.normalizedPath($0.url)) && seen.insert(ProtectionRules.normalizedPath($0.url)).inserted }
     }
 
-    static func retainedCopies(_ items: [CleanupItem]) -> [CleanupItem] {
+    /// One protected copy per duplicate group: the oldest (default) or the newest by modification date.
+    static func retainedCopies(_ items: [CleanupItem], keep: DuplicateKeep = .oldest) -> [CleanupItem] {
         Dictionary(grouping: items.filter { $0.duplicateGroupID != nil }, by: { $0.duplicateGroupID! }).values.compactMap {
             $0.sorted {
-                if $0.modifiedAt != $1.modifiedAt { return ($0.modifiedAt ?? .distantPast) < ($1.modifiedAt ?? .distantPast) }
+                if $0.modifiedAt != $1.modifiedAt {
+                    let older = ($0.modifiedAt ?? .distantPast) < ($1.modifiedAt ?? .distantPast)
+                    return keep == .oldest ? older : !older
+                }
                 return $0.path < $1.path
             }.first
         }
     }
 
-    static func selection(_ items: [CleanupItem]) -> [CleanupItem] {
-        let retained = retainedCopies(items)
+    /// The extra copies: every duplicate except the kept copy of its group.
+    static func extraDuplicateCopies(_ items: [CleanupItem], keep: DuplicateKeep = .oldest) -> [CleanupItem] {
+        let retained = retainedCopies(items, keep: keep)
         return uniqueItems(items.filter { item in
-            item.isSelected && !retained.contains { ProtectionRules.contains(item.url, $0.url) }
+            item.category == .duplicates && !retained.contains { ProtectionRules.contains(item.url, $0.url) }
+        })
+    }
+
+    static func selection(_ items: [CleanupItem], keep: DuplicateKeep = .oldest) -> [CleanupItem] {
+        let retained = retainedCopies(items, keep: keep)
+        return uniqueItems(items.filter { item in
+            item.isSelected && !item.category.isReviewOnly && !retained.contains { ProtectionRules.contains(item.url, $0.url) }
         })
     }
 
@@ -324,8 +359,8 @@ enum CleanupSafety {
         if unreadable { throw Rejection.protected }
     }
 
-    static func validateDuplicates(target: URL, allItems: [CleanupItem]) throws {
-        for retained in retainedCopies(allItems) {
+    static func validateDuplicates(target: URL, allItems: [CleanupItem], keep: DuplicateKeep = .oldest) throws {
+        for retained in retainedCopies(allItems, keep: keep) {
             let group = allItems.filter { $0.duplicateGroupID == retained.duplicateGroupID }
             let removedMembers = group.filter { ProtectionRules.contains(target, $0.url) }
             guard !removedMembers.isEmpty else { continue }

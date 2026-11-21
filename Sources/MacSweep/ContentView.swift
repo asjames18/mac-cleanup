@@ -73,7 +73,7 @@ struct ContentView: View {
                     case .cleanup: CleanupView(model: model)
                     case .storage: StorageView(model: model)
                     case .apps: ApplicationsView(model: model)
-                    case .maintenance: MaintenanceView()
+                    case .maintenance: MaintenanceView(model: model)
                     case .history: HistoryView()
                     }
                 }

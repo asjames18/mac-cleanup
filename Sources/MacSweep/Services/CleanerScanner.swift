@@ -1,7 +1,54 @@
 import Foundation
 import MacSweepCore
 
+/// Extra scan choices beyond the preset.
+/// Fixture scans leave the system locations nil; the app uses `live(...)`.
+struct CleanerOptions: Sendable {
+    var includeDeveloperCaches = false
+    /// macOS's per-user cache folder (`DARWIN_USER_CACHE_DIR`), where Metal keeps compiled shaders.
+    var userCacheDirectory: URL? = nil
+    /// macOS update downloads. Review only.
+    var systemUpdatesFolder: URL? = nil
+    var now = Date()
+
+    static func live(includeDeveloperCaches: Bool) -> CleanerOptions {
+        CleanerOptions(includeDeveloperCaches: includeDeveloperCaches,
+                       userCacheDirectory: CleanerScanner.darwinUserCacheDirectory(),
+                       systemUpdatesFolder: URL(fileURLWithPath: "/Library/Updates", isDirectory: true))
+    }
+}
+
 enum CleanerScanner {
+    /// Browser cache folders under ~/Library/Caches. The generic cache scan leaves these to the browser category.
+    static let browserCacheFolders: [(name: String, path: String)] = [
+        ("Safari", "com.apple.Safari"),
+        ("Chrome", "Google/Chrome"),
+        ("Firefox", "Firefox"),
+        ("Microsoft Edge", "Microsoft Edge"),
+        ("Brave", "BraveSoftware/Brave-Browser"),
+        ("Arc", "company.thebrowser.Browser"),
+    ]
+
+    /// Developer tool caches under ~/Library/Caches. Opt-in; the generic cache scan leaves these alone.
+    static let developerCacheFolders = ["pip", "Yarn", "Homebrew", "CocoaPods", "node-gyp", "go-build", "org.swift.swiftpm", "pnpm", "ms-playwright", "deno"]
+
+    /// Top-level ~/Library/Caches names handled by a more specific category.
+    static var genericCacheExclusions: Set<String> {
+        Set(browserCacheFolders.map { String($0.path.split(separator: "/").first ?? "") } + developerCacheFolders)
+    }
+
+    static let installerExtensions: Set<String> = ["dmg", "pkg", "mpkg", "iso"]
+
+    static func darwinUserCacheDirectory() -> URL? {
+        let length = confstr(_CS_DARWIN_USER_CACHE_DIR, nil, 0)
+        guard length > 0 else { return nil }
+        var buffer = [CChar](repeating: 0, count: length)
+        guard confstr(_CS_DARWIN_USER_CACHE_DIR, &buffer, length) > 0 else { return nil }
+        let path = String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+        guard !path.isEmpty else { return nil }
+        return ProtectionRules.canonicalTrustedRoot(URL(fileURLWithPath: path, isDirectory: true))
+    }
+
     private static let sizeKeys: Set<URLResourceKey> = [
         .isDirectoryKey,
         .isRegularFileKey,
@@ -30,10 +77,11 @@ enum CleanerScanner {
 
     static func scan(customFolders: [URL], preset: ScanPreset, home: URL = FileManager.default.homeDirectoryForCurrentUser,
                      temporaryDirectory: URL = ProtectionRules.canonicalTrustedRoot(URL(fileURLWithPath: NSTemporaryDirectory())),
-                     limit: ScanLimit? = nil, progress: @escaping @Sendable (ScanUpdate) -> Void = { _ in }) -> ScanReport {
+                     limit: ScanLimit? = nil, options: CleanerOptions = CleanerOptions(),
+                     progress: @escaping @Sendable (ScanUpdate) -> Void = { _ in }) -> ScanReport {
         let session = ScanSession(limit: limit ?? (preset == .quick ? .quick : .extended), progress: progress)
         return $session.withValue(session) {
-            scanCleanup(customFolders: customFolders, preset: preset, home: home, temporaryDirectory: temporaryDirectory)
+            scanCleanup(customFolders: customFolders, preset: preset, home: home, temporaryDirectory: temporaryDirectory, options: options)
         }
     }
 
@@ -50,7 +98,7 @@ enum CleanerScanner {
 
     private static var stopped: Bool { Task.isCancelled || (session?.stopped ?? false) }
 
-    private static func scanCleanup(customFolders: [URL], preset: ScanPreset, home: URL, temporaryDirectory: URL) -> ScanReport {
+    private static func scanCleanup(customFolders: [URL], preset: ScanPreset, home: URL, temporaryDirectory: URL, options: CleanerOptions) -> ScanReport {
         var items: [CleanupItem] = []
         var messages: [String] = []
 
@@ -59,7 +107,7 @@ enum CleanerScanner {
         session?.publish(items: items, stage: "Checking Downloads")
 
         if preset.includesDownloads && !stopped {
-            scanDownloads(home: home, into: &items, messages: &messages)
+            scanDownloads(home: home, now: options.now, into: &items, messages: &messages)
         }
 
         session?.publish(items: items, stage: "Checking caches")
@@ -68,6 +116,37 @@ enum CleanerScanner {
                 home.appendingPathComponent("Library/Caches", isDirectory: true),
                 category: .caches,
                 minimumSize: 1_000_000,
+                excludingNames: genericCacheExclusions,
+                into: &items,
+                messages: &messages
+            )
+        }
+
+        session?.publish(items: items, stage: "Checking browser caches")
+        if preset.includesBrowserCaches && !stopped {
+            scanBrowserCaches(home: home, into: &items, messages: &messages)
+        }
+
+        session?.publish(items: items, stage: "Checking GPU shader caches")
+        if preset.includesShaderCaches && !stopped, let cacheDirectory = options.userCacheDirectory {
+            scanDirectoryChildren(
+                cacheDirectory.appendingPathComponent("com.apple.metal", isDirectory: true),
+                category: .shaderCaches,
+                minimumSize: 1_000_000,
+                reportMissing: false,
+                into: &items,
+                messages: &messages
+            )
+        }
+
+        session?.publish(items: items, stage: "Checking crash reports")
+        if preset.includesCrashReports && !stopped {
+            scanFiles(
+                home.appendingPathComponent("Library/Logs/DiagnosticReports", isDirectory: true),
+                category: .crashReports,
+                minimumSize: 1,
+                olderThanDays: nil,
+                now: options.now,
                 into: &items,
                 messages: &messages
             )
@@ -75,13 +154,26 @@ enum CleanerScanner {
 
         session?.publish(items: items, stage: "Checking logs")
         if preset.includesLogs && !stopped {
-            scanDirectoryChildren(
+            scanFiles(
                 home.appendingPathComponent("Library/Logs", isDirectory: true),
                 category: .logs,
-                minimumSize: 100_000,
+                minimumSize: 10_000,
+                olderThanDays: 30,
+                now: options.now,
+                skippingNames: ["DiagnosticReports"],
                 into: &items,
                 messages: &messages
             )
+        }
+
+        session?.publish(items: items, stage: "Checking developer caches")
+        if preset.includesDeveloperCaches(optedIn: options.includeDeveloperCaches) && !stopped {
+            scanDeveloperCaches(home: home, into: &items, messages: &messages)
+        }
+
+        session?.publish(items: items, stage: "Checking update files")
+        if preset.includesReviewOnly && !stopped {
+            scanUpdateFiles(home: home, systemUpdates: options.systemUpdatesFolder, into: &items, messages: &messages)
         }
 
         session?.publish(items: items, stage: "Checking developer files")
@@ -139,11 +231,12 @@ enum CleanerScanner {
         return ScanReport(items: uniqueItems, storageItems: storageItems, messages: messages, coverageSummary: session?.summary ?? "")
     }
 
-    private static func scanDownloads(home: URL, into items: inout [CleanupItem], messages: inout [String]) {
+    private static func scanDownloads(home: URL, now: Date, into items: inout [CleanupItem], messages: inout [String]) {
         let fileManager = FileManager.default
         let downloads = home.appendingPathComponent("Downloads", isDirectory: true)
         let extensions = Set(["dmg", "pkg", "zip", "rar", "7z", "tar", "gz", "iso", "mp4", "mov"])
-        let cutoff = Calendar.current.date(byAdding: .day, value: -14, to: Date()) ?? Date()
+        let cutoff = Calendar.current.date(byAdding: .day, value: -14, to: now) ?? now
+        let installerCutoff = Calendar.current.date(byAdding: .day, value: -30, to: now) ?? now
 
         guard !ProtectionRules.hasSymlinkComponent(downloads), let urls = fileManager.enumerator(
             at: downloads,
@@ -168,6 +261,11 @@ enum CleanerScanner {
             let modified = values?.contentModificationDate
             let isOld = modified.map { $0 < cutoff } ?? false
             let isInstallerOrArchive = extensions.contains(url.pathExtension.lowercased())
+            if installerExtensions.contains(url.pathExtension.lowercased()), let modified, modified < installerCutoff {
+                items.append(makeItem(url, category: .oldInstallers, size: size, values: values,
+                                      reason: "Installer or disk image older than 30 days. Review only: open it in Finder and delete it yourself if you no longer need it."))
+                continue
+            }
 
             guard size >= 10_000_000 || isInstallerOrArchive || isOld else { continue }
             let reason = isInstallerOrArchive
@@ -183,12 +281,15 @@ enum CleanerScanner {
         _ folder: URL,
         category: CleanupCategory,
         minimumSize: Int64,
+        excludingNames: Set<String> = [],
+        reportMissing: Bool = true,
+        reason: String? = nil,
         into items: inout [CleanupItem],
         messages: inout [String]
     ) {
         let fileManager = FileManager.default
         guard !ProtectionRules.hasSymlinkComponent(folder), fileManager.fileExists(atPath: folder.path(percentEncoded: false)) else {
-            messages.append("\(category.title) folder not found.")
+            if reportMissing { messages.append("\(category.title) folder not found.") }
             return
         }
 
@@ -203,15 +304,114 @@ enum CleanerScanner {
         for case let url as URL in urls {
             session?.visit(url)
             if stopped { break }
-            guard !ProtectionRules.isProtected(url) else { continue }
+            guard !ProtectionRules.isProtected(url), !excludingNames.contains(url.lastPathComponent) else { continue }
             let values = readValues(url)
             if values?.isSymbolicLink == true { continue }
             guard let size = allocatedSize(url) else { if stopped { break }; continue }
             if stopped { break }
             guard size >= minimumSize else { continue }
-            items.append(makeItem(url, category: category, size: size, values: values, reason: category.detail))
+            items.append(makeItem(url, category: category, size: size, values: values, reason: reason ?? category.detail))
         }
         messages.append(stopped ? "\(category.title) partially scanned." : "\(category.title) scan finished.")
+    }
+
+    /// Individual files below `folder` (recursively), optionally only those untouched for `olderThanDays`.
+    /// Cloud-only placeholders are never counted or opened.
+    private static func scanFiles(
+        _ folder: URL,
+        category: CleanupCategory,
+        minimumSize: Int64,
+        olderThanDays: Int?,
+        now: Date,
+        skippingNames: Set<String> = [],
+        into items: inout [CleanupItem],
+        messages: inout [String]
+    ) {
+        let fileManager = FileManager.default
+        guard !ProtectionRules.hasSymlinkComponent(folder), fileManager.fileExists(atPath: folder.path(percentEncoded: false)) else { return }
+        guard let enumerator = fileManager.enumerator(
+            at: folder, includingPropertiesForKeys: Array(sizeKeys),
+            options: [.skipsHiddenFiles, .skipsPackageDescendants],
+            errorHandler: { url, error in
+                session?.recordError(url, error: error)
+                return !stopped
+            }
+        ) else { messages.append("\(category.title) unavailable."); return }
+        let cutoff = olderThanDays.map { now.addingTimeInterval(-Double($0) * 86_400) }
+        let rootVolume = volumeID(folder)
+        var found = 0
+        for case let url as URL in enumerator {
+            session?.visit(url)
+            if stopped { break }
+            let values = readValues(url)
+            if values?.isDirectory == true {
+                // Folders are only skipped for policy reasons; a recently changed folder can still hold old files.
+                if skippingNames.contains(url.lastPathComponent) || crossesVolume(values, rootVolume: rootVolume)
+                    || ProtectionRules.isProtected(url, protectRecentFiles: false) { enumerator.skipDescendants() }
+                continue
+            }
+            guard values?.isRegularFile == true, values?.isSymbolicLink != true,
+                  !ProtectionRules.isDataless(url), !ProtectionRules.isProtected(url) else { continue }
+            if let cutoff, (values?.contentModificationDate ?? .distantFuture) > cutoff { continue }
+            let size = Int64(values?.totalFileAllocatedSize ?? values?.fileAllocatedSize ?? 0)
+            guard size >= minimumSize else { continue }
+            items.append(makeItem(url, category: category, size: size, values: values, reason: category.detail))
+            found += 1
+        }
+        messages.append(stopped ? "\(category.title) partially scanned." : "\(category.title) scan finished: \(found) found.")
+    }
+
+    private static func scanBrowserCaches(home: URL, into items: inout [CleanupItem], messages: inout [String]) {
+        let caches = home.appendingPathComponent("Library/Caches", isDirectory: true)
+        var found = 0
+        for browser in browserCacheFolders {
+            if stopped { break }
+            let url = caches.appendingPathComponent(browser.path, isDirectory: true)
+            guard FileManager.default.fileExists(atPath: url.path), !ProtectionRules.isProtected(url) else { continue }
+            let values = readValues(url)
+            guard values?.isSymbolicLink != true, let size = allocatedSize(url), size >= 1_000_000 else { continue }
+            items.append(makeItem(url, category: .browserCaches, size: size, values: values,
+                                  reason: "\(browser.name) web cache. Quit \(browser.name) first; files it has open are skipped. It rebuilds the cache as you browse."))
+            found += 1
+        }
+        messages.append("Browser caches checked: \(found) found.")
+    }
+
+    private static func scanDeveloperCaches(home: URL, into items: inout [CleanupItem], messages: inout [String]) {
+        let caches = home.appendingPathComponent("Library/Caches", isDirectory: true)
+        for name in developerCacheFolders {
+            if stopped { break }
+            let url = caches.appendingPathComponent(name, isDirectory: true)
+            guard FileManager.default.fileExists(atPath: url.path), !ProtectionRules.isProtected(url) else { continue }
+            let values = readValues(url)
+            guard values?.isSymbolicLink != true, let size = allocatedSize(url), size >= 1_000_000 else { continue }
+            items.append(makeItem(url, category: .developerCaches, size: size, values: values,
+                                  reason: "\(name) download cache. The tool downloads what it needs again."))
+        }
+        let developer = home.appendingPathComponent("Library/Developer", isDirectory: true)
+        for (folder, reason) in [
+            ("Xcode/iOS DeviceSupport", "Debug symbols copied from an iPhone or iPad. Xcode copies them again when that device connects."),
+            ("Xcode/watchOS DeviceSupport", "Debug symbols copied from an Apple Watch. Xcode copies them again when needed."),
+            ("CoreSimulator/Caches", "Simulator caches. The Simulator rebuilds them."),
+        ] {
+            if stopped { break }
+            scanDirectoryChildren(developer.appendingPathComponent(folder, isDirectory: true), category: .developerCaches,
+                                  minimumSize: 1_000_000, reportMissing: false, reason: reason, into: &items, messages: &messages)
+        }
+        messages.append("Developer caches checked (opt-in). The npm cache lives in the hidden ~/.npm folder, which MacSweep never touches; run `npm cache clean --force` to clear it.")
+    }
+
+    /// Review only. Listed with sizes so you know they are there; never selectable.
+    private static func scanUpdateFiles(home: URL, systemUpdates: URL?, into items: inout [CleanupItem], messages: inout [String]) {
+        if let systemUpdates, FileManager.default.fileExists(atPath: systemUpdates.path), !ProtectionRules.hasSymlinkComponent(systemUpdates),
+           let size = allocatedSize(systemUpdates), size >= 10_000_000 {
+            items.append(makeItem(systemUpdates, category: .systemUpdates, size: size, values: readValues(systemUpdates),
+                                  reason: "macOS update downloads. Review only: macOS manages this folder. Install or cancel the update in Software Update."))
+        }
+        let ipsw = home.appendingPathComponent("Library/iTunes/iPhone Software Updates", isDirectory: true)
+        scanDirectoryChildren(ipsw, category: .systemUpdates, minimumSize: 10_000_000, reportMissing: false,
+                              reason: "iPhone or iPad software update file. Review only: Finder downloads it again when needed; delete it in Finder if you like.",
+                              into: &items, messages: &messages)
     }
 
     private static func scanLargeFiles(home: URL, into items: inout [CleanupItem], messages: inout [String]) {
@@ -346,9 +546,7 @@ enum CleanerScanner {
                     if stopped { break }
                     let values = readValues(url)
                     let size = Int64(values?.totalFileAllocatedSize ?? values?.fileAllocatedSize ?? 0)
-                    let reason = index == 0
-                        ? "Original candidate in duplicate group. Kept unselected by default."
-                        : "Duplicate file matches another file by size and SHA-256 hash."
+                    let reason = "Matches \(sortedURLs.count - 1 == 1 ? "1 other file" : "\(sortedURLs.count - 1) other files") by size and SHA-256 hash. One copy is always kept (oldest or newest, your choice)."
                     items.append(makeItem(
                         url,
                         category: .duplicates,
@@ -531,7 +729,9 @@ enum CleanerScanner {
             modifiedAt: values?.contentModificationDate,
             kind: kind,
             reason: reason,
-            safetyNote: ProtectionRules.note(for: url, category: category),
+            safetyNote: category.isReviewOnly
+                ? "Review only. MacSweep never selects or moves this; open it in Finder to decide."
+                : ProtectionRules.note(for: url, category: category),
             duplicateGroupID: duplicateGroupID,
             isSelected: false,
             snapshot: try? FileSnapshotReader.capture(url)

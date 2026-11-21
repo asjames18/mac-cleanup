@@ -26,6 +26,7 @@ struct DashboardView: View {
                 hero
                 HealthCardHost(model: model, inputs: monitor.health)
                 if let nudges, let actions { NudgesCard(monitor: nudges, center: nudges.center, handler: actions) }
+                if model.lastScanDate != nil && !model.items.isEmpty { spaceCard }
                 if model.aiSettings.enabled { aiSuggestions }
                 LiveMetricsRow(fast: monitor.fast, slow: monitor.slow)
                     .equatable()
@@ -63,25 +64,101 @@ struct DashboardView: View {
         SuiteCard {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
-                    Label("AI suggestions", systemImage: "wand.and.stars").font(.headline).foregroundStyle(Theme.accent)
+                    Label("Suggestions", systemImage: "wand.and.stars").font(.headline).foregroundStyle(Theme.accent)
                     Spacer()
-                    Chip(text: "Local rules · no network", color: Theme.muted)
+                    Chip(text: model.aiSettings.provider == .rules ? "Built-in rules · no network" : "Rules + AI on request", color: Theme.muted)
+                    if model.aiSettings.provider == .openai {
+                        Button {
+                            Task { await model.askAI() }
+                        } label: {
+                            if model.isAskingAI { ProgressView().controlSize(.small) } else { Label("Ask AI", systemImage: "sparkles") }
+                        }
+                        .disabled(model.isAskingAI || model.lastScanDate == nil || model.isBusy)
+                        .help("Sends scan totals (sizes and counts, no file names) to \(model.aiSettings.model.isEmpty ? "your endpoint" : model.aiSettings.model). Up to \(model.aiSettings.timeoutSeconds) s.")
+                    }
+                    Button { model.refreshSuggestions() } label: { Label("Refresh", systemImage: "arrow.clockwise") }
+                        .help("Re-check startup items and protection status. Applied suggestions stay hidden until the next Smart Scan.")
                 }
-                let recommendations = model.aiRecommendations
-                if recommendations.isEmpty {
-                    Text(model.aiSettings.provider == .rules ? "Run Smart Scan to get suggestions." : "This provider is not connected in this version.")
+                if let status = model.aiStatus {
+                    Text(status).font(.caption).foregroundStyle(Theme.muted)
+                }
+                let cards = model.suggestionCards
+                if cards.isEmpty {
+                    Text(model.lastScanDate == nil ? "Run Smart Scan to get suggestions." : "Nothing to suggest right now.")
                         .font(.callout).foregroundStyle(Theme.muted)
                 }
-                ForEach(recommendations) { recommendation in
-                    HStack {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(recommendation.title).font(.callout.weight(.medium))
-                            Text(recommendation.detail).font(.caption).foregroundStyle(Theme.muted)
+                ForEach(cards) { card in
+                    HStack(alignment: .top, spacing: 12) {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(card.title).font(.callout.weight(.medium))
+                            if !card.reason.isEmpty { Text(card.reason).font(.caption).foregroundStyle(Theme.muted) }
+                            HStack(spacing: 6) {
+                                Chip(text: card.source.label, color: card.source == .rules ? Theme.muted : Theme.accent)
+                                if card.facts.bytes > 0 { Chip(text: "≈ \(card.facts.bytes.formattedFileSize)", color: Theme.accent2) }
+                                Chip(text: card.facts.risk.label, color: card.facts.risk == .medium ? Theme.warn : card.facts.risk == .low ? Theme.ok : Theme.muted)
+                                if card.action.changesFiles {
+                                    Chip(text: card.facts.reversible ? "Undoable from Trash or History" : "Can't be undone",
+                                         color: card.facts.reversible ? Theme.ok : Theme.danger)
+                                }
+                            }
                         }
                         Spacer()
-                        Button("Apply…") { model.applyAIRecommendation(recommendation) }
+                        Button(card.action.changesFiles ? "Apply…" : "Review") { model.applySuggestion(card) }
                             .disabled(model.isBusy || model.waitingForFilesystem)
                     }
+                    Divider()
+                }
+                if model.hiddenSuggestionCount > 0 {
+                    Text("\(model.hiddenSuggestionCount) hidden: applied since the last Smart Scan, or refused by macOS in the last 14 days.")
+                        .font(.caption).foregroundStyle(Theme.muted)
+                }
+            }
+        }
+    }
+
+    /// "Space you could free": what MacSweep found, split by how safe it is to clean.
+    private var spaceCard: some View {
+        let breakdown = model.spaceBreakdown
+        return SuiteCard {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Label("Space you could free", systemImage: "chart.pie").font(.headline).foregroundStyle(Theme.accent2)
+                    Spacer()
+                    Text(breakdown.totalBytes.formattedFileSize).font(.title3.weight(.semibold)).monospacedDigit()
+                }
+                spaceGroup("Ready to clean", detail: "Caches, logs and reports that apps rebuild", lines: breakdown.readyToClean, total: breakdown.readyBytes, color: Theme.ok)
+                spaceGroup("Review first", detail: "Your own files: downloads, extra duplicate copies, large files", lines: breakdown.reviewFirst, total: breakdown.reviewBytes, color: Theme.warn)
+                spaceGroup("Review only", detail: "Listed so you know; MacSweep never moves these", lines: breakdown.reviewOnly, total: breakdown.reviewOnlyBytes, color: Theme.muted)
+                if !model.includeDeveloperCaches && model.selectedPreset != .developer {
+                    Text("Developer caches are not included. Turn them on in Smart Scan to measure them.").font(.caption).foregroundStyle(Theme.muted)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func spaceGroup(_ title: String, detail: String, lines: [SpaceBreakdown.Line], total: Int64, color: Color) -> some View {
+        if !lines.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Circle().fill(color).frame(width: 8, height: 8)
+                    Text(title).font(.callout.weight(.semibold))
+                    Text(detail).font(.caption).foregroundStyle(Theme.muted)
+                    Spacer()
+                    Text(total.formattedFileSize).font(.callout.weight(.medium)).monospacedDigit()
+                }
+                ForEach(lines) { line in
+                    Button {
+                        model.mainViewMode = .cleanup
+                        model.selectedCategory = line.category
+                    } label: {
+                        HStack {
+                            Image(systemName: line.category.systemImage).frame(width: 18).foregroundStyle(Theme.muted)
+                            Text("\(line.category.title) · \(line.count)").font(.caption)
+                            Spacer()
+                            Text(line.bytes.formattedFileSize).font(.caption).monospacedDigit().foregroundStyle(Theme.muted)
+                        }.padding(.leading, 16).contentShape(Rectangle())
+                    }.buttonStyle(.plain)
                 }
             }
         }

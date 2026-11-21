@@ -9,7 +9,7 @@ struct CleanupView: View {
     }
 
     var body: some View {
-        let retained = CleanupSafety.retainedCopies(model.items)
+        let retained = CleanupSafety.retainedCopies(model.items, keep: model.duplicateKeep)
         VStack(spacing: 0) {
             HStack(alignment: .center, spacing: 16) {
                 VStack(alignment: .leading, spacing: 6) {
@@ -21,6 +21,10 @@ struct CleanupView: View {
                 Picker("Scan preset", selection: $model.selectedPreset) {
                     ForEach(ScanPreset.allCases) { preset in Text(preset.title).tag(preset) }
                 }.frame(width: 155).disabled(model.isBusy || model.waitingForFilesystem)
+                Toggle("Developer caches", isOn: $model.includeDeveloperCaches)
+                    .toggleStyle(.checkbox)
+                    .disabled(model.isBusy || model.waitingForFilesystem || model.selectedPreset == .developer)
+                    .help("Opt-in: also measure pip, Yarn, Homebrew, CocoaPods, Swift package and device-support caches. The Developer preset always includes them.")
                 Button { model.scan() } label: {
                     Label(model.lastScanDate == nil ? "Scan" : "Scan Again", systemImage: "magnifyingglass")
                 }.buttonStyle(.borderedProminent).disabled(model.isBusy || model.waitingForFilesystem)
@@ -42,7 +46,25 @@ struct CleanupView: View {
             }.padding(.horizontal, 24).padding(.vertical, 14)
             Divider()
             if model.selectedCategory == .duplicates || model.selectedPreset == .duplicatesOnly {
-                Text("Duplicate scans compare files of at least 1 MB. Hidden files, package contents and protected locations are excluded. Check Activity for read errors and coverage limits.")
+                HStack(spacing: 14) {
+                    Text("Duplicate scans compare files of at least 1 MB. Hidden files, package contents and protected locations are excluded. Check Activity for read errors and coverage limits.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Picker("Copy to keep", selection: $model.duplicateKeep) {
+                        ForEach(CleanupSafety.DuplicateKeep.allCases) { Text($0.title).tag($0) }
+                    }
+                    .pickerStyle(.segmented).frame(width: 230)
+                    .disabled(model.isBusy || model.waitingForFilesystem)
+                    .help("Which copy of each group is always kept. The other copies can be selected.")
+                    Button("Select Extra Copies") { model.selectExtraDuplicateCopies() }
+                        .disabled(model.isBusy || model.waitingForFilesystem || !model.items.contains { $0.category == .duplicates })
+                        .help("Select every copy except the kept one in each group. Nothing moves until you confirm.")
+                }
+                .padding(.horizontal, 24).padding(.vertical, 10)
+                Divider()
+            }
+            if let category = model.selectedCategory, category.isReviewOnly {
+                Label(category.detail, systemImage: "eye")
                     .font(.caption).foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 24).padding(.vertical, 10)
@@ -75,9 +97,10 @@ struct CleanupView: View {
                 if let item = model.focusedItem, !model.items.isEmpty {
                     CleanupDetailView(item: item,
                         copies: item.duplicateGroupID.map { group in model.items.filter { $0.duplicateGroupID == group }.sorted { $0.id < $1.id } } ?? [],
+                        keep: model.duplicateKeep,
                         busy: model.isBusy || model.waitingForFilesystem,
                         onToggle: { model.toggleItem($0) })
-                        .id(item.duplicateGroupID ?? item.id)
+                        .id((item.duplicateGroupID ?? item.id) + model.duplicateKeep.rawValue)
                         .frame(minWidth: 240, idealWidth: 270, maxWidth: 340)
                 }
             }
@@ -132,8 +155,9 @@ private struct CleanupFileRow: View {
         HStack(spacing: 12) {
             Toggle("Select \(item.name)", isOn: Binding(get: { item.isSelected }, set: { _ in onToggle() }))
                 .labelsHidden().toggleStyle(.checkbox)
-                .disabled(protectsRetainedCopy)
-                .help(protectsRetainedCopy ? "This item is a required retained duplicate or contains one." : "Select this candidate for review before removal")
+                .disabled(protectsRetainedCopy || item.category.isReviewOnly)
+                .help(item.category.isReviewOnly ? "Review only. MacSweep never moves this; reveal it in Finder to decide."
+                      : protectsRetainedCopy ? "This item is a required retained duplicate or contains one." : "Select this candidate for review before removal")
             Button(action: onFocus) {
                 HStack(spacing: 12) {
                     Image(systemName: item.category.systemImage).foregroundStyle(Theme.accent2).frame(width: 24)
@@ -142,6 +166,9 @@ private struct CleanupFileRow: View {
                         if protectsRetainedCopy {
                             Label("Protected: retains a duplicate copy", systemImage: "checkmark.shield")
                                 .font(.caption).foregroundStyle(.secondary)
+                        }
+                        if item.category.isReviewOnly {
+                            Label("Review only", systemImage: "eye").font(.caption).foregroundStyle(.secondary)
                         }
                         Text(item.path).font(.caption).foregroundStyle(.secondary)
                             .lineLimit(1).truncationMode(.middle)
@@ -164,11 +191,12 @@ private struct CleanupFileRow: View {
 private struct CleanupDetailView: View {
     let item: CleanupItem
     let copies: [CleanupItem]
+    let keep: CleanupSafety.DuplicateKeep
     let busy: Bool
     let onToggle: (CleanupItem) -> Void
     @State private var shownCopies = 20
     var body: some View {
-        let retainedID = CleanupSafety.retainedCopies(copies).first?.id
+        let retainedID = CleanupSafety.retainedCopies(copies, keep: keep).first?.id
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 Image(systemName: item.category.systemImage).font(.largeTitle).foregroundStyle(Theme.accent2)
@@ -187,8 +215,11 @@ private struct CleanupDetailView: View {
                             .font(.caption).foregroundStyle(.secondary)
                         ForEach(Array(copies.prefix(shownCopies))) { copy in
                             VStack(alignment: .leading, spacing: 6) {
-                                Label(copy.id == retainedID ? "Required retained copy" : copy.isSelected ? "Selected for Trash" : "Keeping", systemImage: copy.isSelected ? "trash" : "checkmark.shield")
+                                Label(copy.id == retainedID ? "Kept copy (\(keep == .oldest ? "oldest" : "newest"))" : copy.isSelected ? "Selected for Trash" : "Keeping", systemImage: copy.isSelected ? "trash" : "checkmark.shield")
                                     .font(.caption.weight(.semibold))
+                                if let modified = copy.modifiedAt {
+                                    Text("Modified \(modified.formatted(date: .abbreviated, time: .shortened))").font(.caption).foregroundStyle(.secondary)
+                                }
                                 Text(copy.path).font(.caption).textSelection(.enabled)
                                     .lineLimit(3).truncationMode(.middle).help(copy.path)
                                 HStack {

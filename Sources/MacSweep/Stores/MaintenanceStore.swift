@@ -89,6 +89,10 @@ final class MaintenanceStore: ObservableObject {
         )
     }
 
+    func openAppStoreUpdates() {
+        openSettings(URL(string: "macappstore://showUpdatesPage"), name: "App Store updates")
+    }
+
     func openActivityMonitor() {
         openApplication(at: "/System/Applications/Utilities/Activity Monitor.app", name: "Activity Monitor")
     }

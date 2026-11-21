@@ -1,11 +1,12 @@
 import Foundation
 
-/// Dormant AI settings. Only the *name* of an environment variable is ever stored, never a key.
-/// This build has no network client: nothing is sent anywhere, whatever these values are.
+/// AI settings, off by default. Only the *name* of an environment variable is ever stored, never a key.
+/// Nothing is sent anywhere unless suggestions are on, the OpenAI-compatible provider is picked,
+/// and the user asks for AI suggestions or tests the connection. This file has no network code.
 public struct AISettings: Codable, Equatable, Sendable {
     public enum Provider: String, Codable, CaseIterable, Sendable {
         case rules   // local rules only
-        case openai  // OpenAI-compatible endpoint (LM Studio, Ollama, OpenRouter); not connected in this build
+        case openai  // OpenAI-compatible endpoint (LM Studio, Ollama, OpenRouter); used only when asked
     }
 
     public var enabled: Bool
@@ -13,14 +14,20 @@ public struct AISettings: Codable, Equatable, Sendable {
     public var baseURL: String
     public var model: String
     public var keyEnv: String
+    /// Hard deadline for one request to the endpoint, in seconds (10 to 120).
+    public var timeoutSeconds: Int
+
+    public static let defaultTimeout = 45
+    public static let timeoutRange = 10...120
 
     public init(enabled: Bool = false, provider: Provider = .rules, baseURL: String = "http://127.0.0.1:1234/v1",
-                model: String = "", keyEnv: String = "OPENROUTER_API_KEY") {
+                model: String = "", keyEnv: String = "OPENROUTER_API_KEY", timeoutSeconds: Int = AISettings.defaultTimeout) {
         self.enabled = enabled
         self.provider = provider
         self.baseURL = baseURL
         self.model = model
         self.keyEnv = keyEnv
+        self.timeoutSeconds = timeoutSeconds
     }
 
     public static let dormant = AISettings()
@@ -33,6 +40,7 @@ public struct AISettings: Codable, Equatable, Sendable {
         baseURL = try c.decodeIfPresent(String.self, forKey: .baseURL) ?? fallback.baseURL
         model = try c.decodeIfPresent(String.self, forKey: .model) ?? fallback.model
         keyEnv = try c.decodeIfPresent(String.self, forKey: .keyEnv) ?? fallback.keyEnv
+        timeoutSeconds = (try? c.decodeIfPresent(Int.self, forKey: .timeoutSeconds)) ?? fallback.timeoutSeconds
     }
 
     public enum ValidationError: Error, Equatable, LocalizedError {
@@ -86,6 +94,7 @@ public struct AISettings: Codable, Equatable, Sendable {
         guard Self.isEnvName(copy.keyEnv) else { throw ValidationError.invalidEnvName }
         guard Self.isEndpoint(copy.baseURL) else { throw ValidationError.invalidEndpoint }
         guard copy.model.count <= 120 else { throw ValidationError.modelTooLong }
+        copy.timeoutSeconds = min(max(timeoutSeconds, Self.timeoutRange.lowerBound), Self.timeoutRange.upperBound)
         return copy
     }
 
