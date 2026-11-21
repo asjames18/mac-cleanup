@@ -8,7 +8,7 @@ final class AISettingsTests: XCTestCase {
         XCTAssertFalse(ai.enabled)
         XCTAssertEqual(ai.provider, .rules)
         XCTAssertEqual(ai.baseURL, "http://127.0.0.1:1234/v1")
-        XCTAssertEqual(ai.keyEnv, "OPENROUTER_API_KEY")
+        XCTAssertEqual(ai.keyEnv, "")
         XCTAssertFalse(MacSweepSettings().ai.enabled)
     }
 
@@ -46,7 +46,7 @@ final class AISettingsTests: XCTestCase {
         let json = #"{"version":1,"sandboxEnabled":true,"ai":{"enabled":true,"provider":"openai","baseURL":"https://openrouter.ai/api/v1","model":"x","keyEnv":"sk-or-v1-0123456789abcdef0123456789abcdef"}}"#
         let settings = try JSONCoding.decoder().decode(MacSweepSettings.self, from: Data(json.utf8))
         XCTAssertFalse(settings.ai.enabled)
-        XCTAssertEqual(settings.ai.keyEnv, "OPENROUTER_API_KEY")
+        XCTAssertEqual(settings.ai.keyEnv, "")
         let encoded = String(decoding: try JSONCoding.encoder().encode(settings), as: UTF8.self)
         XCTAssertFalse(encoded.contains("sk-or"))
     }

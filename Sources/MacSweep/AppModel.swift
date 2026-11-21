@@ -553,11 +553,50 @@ final class AppModel: ObservableObject {
         guard let root = settingsStore?.store.root else { return SuggestionSkipList() }
         return SuggestionSkipList.load(from: root)
     }()
-    /// Tests swap these so they never reach the network or read the real environment.
+    /// Tests swap these so they never reach the network, read the real environment, or touch the login Keychain.
     var aiTransport: any AITransport = LiveAITransport()
     var aiEnvironment: [String: String] = ProcessInfo.processInfo.environment
+    var aiKeyStore: any AIKeyStore = AIKeyStores.live()
+    /// Whether a key is saved in the Keychain. Only this yes/no is ever shown, never the key.
+    @Published private(set) var aiKeySaved = false
 
-    var aiClient: AIClient { AIClient(settings: aiSettings, transport: aiTransport, environment: aiEnvironment) }
+    var aiClient: AIClient { makeAIClient(aiSettings) }
+
+    private func makeAIClient(_ settings: AISettings) -> AIClient {
+        AIClient(settings: settings, transport: aiTransport, environment: aiEnvironment, keyStore: aiKeyStore)
+    }
+
+    func refreshAIKeyStatus() { aiKeySaved = aiKeyStore.hasKey() }
+
+    /// Saves or replaces the key in the Keychain. The value is never logged or shown; returns an error message or nil.
+    @discardableResult
+    func saveAIKey(_ key: String) -> String? {
+        do { try aiKeyStore.save(key) }
+        catch {
+            let message = error.localizedDescription
+            showToast(message, kind: .danger)
+            return message
+        }
+        let replaced = aiKeySaved
+        refreshAIKeyStatus()
+        recordAction("ai", replaced ? "AI key replaced in the Keychain." : "AI key saved in the Keychain.")
+        showToast(replaced ? "Key replaced in the Keychain." : "Key saved in the Keychain.", kind: .ok)
+        return nil
+    }
+
+    @discardableResult
+    func removeAIKey() -> String? {
+        do { try aiKeyStore.remove() }
+        catch {
+            let message = error.localizedDescription
+            showToast(message, kind: .danger)
+            return message
+        }
+        refreshAIKeyStatus()
+        recordAction("ai", "AI key removed from the Keychain.")
+        showToast("Key removed from the Keychain.", kind: .ok)
+        return nil
+    }
 
     var suggestionContext: SuggestionContext {
         SuggestionContext(items: items, keep: duplicateKeep, startup: startupDefinitions, protection: protectionStatus,
@@ -617,24 +656,24 @@ final class AppModel: ObservableObject {
     }
 
     func testAIConnection(_ draft: AISettings) async -> AIConnectionReport {
-        let client = AIClient(settings: draft, transport: aiTransport, environment: aiEnvironment)
+        let client = makeAIClient(draft)
         let report = await client.testConnection()
         recordAction("ai", "Connection test: \(report.ok ? "ok" : "failed") in \(String(format: "%.2f", report.seconds)) s.")
         return report
     }
 
     func loadAIModels(_ draft: AISettings) async -> Result<[String], AIError> {
-        let client = AIClient(settings: draft, transport: aiTransport, environment: aiEnvironment)
+        let client = makeAIClient(draft)
         do { return .success(try await client.models()) }
         catch let error as AIError { return .failure(error) }
         catch { return .failure(.network(client.scrub(error.localizedDescription))) }
     }
 
     func aiKeyFound(_ draft: AISettings) -> Bool {
-        AIClient(settings: draft, transport: aiTransport, environment: aiEnvironment).keyFound
+        makeAIClient(draft).keyFound
     }
 
-    /// Validates and saves. Rejects key values; only an environment variable name is stored.
+    /// Validates and saves. Rejects key values; the key itself lives only in the Keychain.
     @discardableResult
     func saveAISettings(_ draft: AISettings) -> String? {
         let valid: AISettings
@@ -650,7 +689,7 @@ final class AppModel: ObservableObject {
             aiProposals = []; aiStatus = nil
         }
         aiSettings = valid
-        recordAction("ai", "AI settings saved: \(valid.enabled ? "on" : "off"), provider \(valid.provider.rawValue), key variable \(valid.keyEnv.isEmpty ? "none" : valid.keyEnv), timeout \(valid.timeoutSeconds) s.")
+        recordAction("ai", "AI settings saved: \(valid.enabled ? "on" : "off"), provider \(valid.provider.rawValue), fallback key variable \(valid.keyEnv.isEmpty ? "none" : valid.keyEnv), timeout \(valid.timeoutSeconds) s.")
         showToast(!valid.enabled ? "Suggestions off." : valid.provider == .rules ? "Suggestions on (built-in rules, no network)."
                   : "Suggestions on. The AI is asked only when you press Ask AI.", kind: .ok)
         rebuildSuggestions()

@@ -72,7 +72,7 @@ Start with a scan, review the candidates (everything starts unselected), then co
 
 ## Privacy
 
-MacSweep is local-first. Cleanup history is stored on your Mac under `~/Library/Application Support/MacSweep/History`, with private permissions. There is no account and no required network service. Suggestions stay off until you enable them, and the built-in rules never use the network. If you pick the OpenAI-compatible provider, MacSweep contacts that endpoint only when you press Ask AI, Test Connection, or Load Models, and sends scan totals only. MacSweep stores the name of the environment variable that holds your API key, never the key itself. Apps opened from Finder don't see variables set in your shell profile, so set the variable with `launchctl setenv` or open MacSweep from Terminal. Local servers such as LM Studio or Ollama need no key.
+MacSweep is local-first. Cleanup history is stored on your Mac under `~/Library/Application Support/MacSweep/History`, with private permissions. There is no account and no required network service. Suggestions stay off until you enable them, and the built-in rules never use the network. If you pick the OpenAI-compatible provider, MacSweep contacts that endpoint only when you press Ask AI, Test Connection, or Load Models, and sends scan totals only. Paste the API key into Settings and MacSweep saves it in your Mac's Keychain (this Mac only, available while it's unlocked). It is never shown again, logged, or written to MacSweep's settings files; Settings only says whether a key is saved. If you prefer, you can instead name an environment variable that holds the key. Local servers such as LM Studio or Ollama need no key.
 
 ## Verify the download
 

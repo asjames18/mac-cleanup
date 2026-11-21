@@ -93,7 +93,8 @@ struct MacSweepSettingsView: View {
     }
 }
 
-/// Off by default. Stores an environment variable name only, never a key. The AI is contacted only when you press
+/// Off by default. The key goes straight into the Keychain and is never shown again; only "Key saved" is displayed.
+/// The AI is contacted only when you press
 /// Ask AI on the Overview, Test Connection or Load Models.
 struct AISettingsSection: View {
     @ObservedObject var model: AppModel
@@ -102,6 +103,7 @@ struct AISettingsSection: View {
     @State private var testResult: String?
     @State private var testing = false
     @State private var models: [String] = []
+    @State private var keyEntry = ""
 
     var body: some View {
         Section("Suggestions (off by default)") {
@@ -121,12 +123,22 @@ struct AISettingsSection: View {
                     }
                 }
                 HStack {
-                    TextField("API key environment variable name", text: $draft.keyEnv)
-                    Text(draft.keyEnv.isEmpty ? "No key" : model.aiKeyFound(draft) ? "Found" : "Not set")
-                        .font(.caption).foregroundStyle(draft.keyEnv.isEmpty || model.aiKeyFound(draft) ? Theme.ok : Theme.warn)
+                    SecureField(model.aiKeySaved ? "Paste a new key to replace it" : "API key (optional)", text: $keyEntry)
+                    Button(model.aiKeySaved ? "Replace Key" : "Save Key") {
+                        error = model.saveAIKey(keyEntry)
+                        keyEntry = ""
+                    }.disabled(keyEntry.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
+                HStack {
+                    Label(model.aiKeySaved ? "Key saved in Keychain" : "No key saved",
+                          systemImage: model.aiKeySaved ? "key.fill" : "key")
+                        .font(.caption).foregroundStyle(model.aiKeySaved ? Theme.ok : Color.secondary)
+                    Spacer()
+                    if model.aiKeySaved { Button("Remove Key", role: .destructive) { error = model.removeAIKey() } }
+                }
+                TextField("Fallback: key environment variable name (optional)", text: $draft.keyEnv)
                 Stepper("Time limit: \(draft.timeoutSeconds) s", value: $draft.timeoutSeconds, in: AISettings.timeoutRange, step: 5)
-                Text("Enter only the variable name, for example OPENROUTER_API_KEY; key values are rejected and never stored or shown. Apps opened from Finder don't see variables from your shell profile, so set it with launchctl setenv or open MacSweep from Terminal. Local servers (LM Studio, Ollama) need no key. The AI gets scan totals only (sizes and counts, no file names), can only pick MacSweep's own allowlisted actions, and every Apply asks first.")
+                Text("The key is saved in your Mac's Keychain (this Mac only, available while it's unlocked) and is never shown, logged, or written to MacSweep's settings. Local servers (LM Studio, Ollama) need no key. The AI gets scan totals only (sizes and counts, no file names), can only pick MacSweep's own allowlisted actions, and every Apply asks first.")
                     .font(.caption).foregroundStyle(.secondary)
                 HStack {
                     Button(testing ? "Testing…" : "Test Connection") {
@@ -162,6 +174,7 @@ struct AISettingsSection: View {
                 Button("Save Suggestion Settings") { error = model.saveAISettings(draft) }
             }
         }
-        .onAppear { draft = model.aiSettings }
+        .onAppear { draft = model.aiSettings; model.refreshAIKeyStatus() }
+        .onDisappear { keyEntry = "" }
     }
 }

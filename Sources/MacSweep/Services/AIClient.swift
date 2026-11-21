@@ -6,7 +6,8 @@ import MacSweepCore
 
 // The only file in MacSweep that talks to the network. It is used only when AI suggestions are on,
 // the OpenAI-compatible provider is picked, and the user presses Ask AI, Test Connection or Load Models.
-// The key is read from the named environment variable at call time and never stored, logged or shown.
+// The key is read at call time from the Keychain (or, as a fallback, a named environment variable) and is never
+// logged, shown, or written to settings.
 
 /// Sends one request. Tests swap in a stub, so unit tests never reach the network.
 protocol AITransport: Sendable {
@@ -65,6 +66,7 @@ struct AIClient: Sendable {
     let settings: AISettings
     var transport: any AITransport = LiveAITransport()
     var environment: [String: String] = ProcessInfo.processInfo.environment
+    var keyStore: (any AIKeyStore)? = nil
     var clock: @Sendable () -> Date = { Date() }
 
     static let systemPrompt = """
@@ -76,12 +78,24 @@ struct AIClient: Sendable {
     {"recommendations":[{"title":"short imperative title","reason":"one plain sentence","action":{"type":"trash_category","category":"caches"}}]}
     """
 
-    var keyFound: Bool { key != nil }
+    var keyFound: Bool { keyStore?.hasKey() == true || environmentKey != nil }
 
+    /// The saved Keychain key wins; the environment variable is only a fallback.
     private var key: String? {
+        if let saved = keyStore?.read()?.trimmingCharacters(in: .whitespacesAndNewlines), !saved.isEmpty { return saved }
+        return environmentKey
+    }
+
+    private var environmentKey: String? {
         let name = settings.keyEnv.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty, let value = environment[name]?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
         return value
+    }
+
+    private var keyNote: String {
+        if keyStore?.hasKey() == true { return " · key saved in Keychain" }
+        if environmentKey != nil { return " · key from \(settings.keyEnv)" }
+        return " · no key saved"
     }
 
     private var timeout: Int { min(max(settings.timeoutSeconds, AISettings.timeoutRange.lowerBound), AISettings.timeoutRange.upperBound) }
@@ -108,9 +122,9 @@ struct AIClient: Sendable {
 
     /// Removes the key from any text that might be shown, in case an endpoint echoes it back.
     func scrub(_ text: String) -> String {
-        var result = String(text.prefix(300))
+        var result = text
         if let key, !key.isEmpty { result = result.replacingOccurrences(of: key, with: "•••") }
-        return result.replacingOccurrences(of: "\n", with: " ")
+        return String(result.prefix(300)).replacingOccurrences(of: "\n", with: " ")
     }
 
     /// Runs `work` with a hard deadline. Whatever is still running at the deadline is cancelled.
@@ -210,12 +224,12 @@ struct AIClient: Sendable {
             let found: Bool? = model.isEmpty ? nil : ids.contains(model)
             var message = "Connected in \(String(format: "%.2f", seconds)) s · \(ids.count) models available"
             if let found { message += found ? " · \(model) is available" : " · \(model) was not in the list" }
-            if !settings.keyEnv.isEmpty { message += keyFound ? " · key variable found" : " · key variable \(settings.keyEnv) is not set for MacSweep" }
+            message += keyNote
             return AIConnectionReport(ok: true, seconds: seconds, modelCount: ids.count, modelFound: found, keyFound: keyFound, message: message + ".")
         } catch {
             let seconds = (clock().timeIntervalSince(started) * 100).rounded() / 100
             var message = "Test failed after \(String(format: "%.2f", seconds)) s: \(scrub(error.localizedDescription))"
-            if !settings.keyEnv.isEmpty && !keyFound { message += " The key variable \(settings.keyEnv) is not set for MacSweep." }
+            if !keyFound { message += " No key is saved (local servers such as LM Studio or Ollama don't need one)." }
             return AIConnectionReport(ok: false, seconds: seconds, modelCount: 0, modelFound: nil, keyFound: keyFound, message: message)
         }
     }

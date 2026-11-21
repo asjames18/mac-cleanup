@@ -1,6 +1,7 @@
 import Foundation
 
-/// AI settings, off by default. Only the *name* of an environment variable is ever stored, never a key.
+/// AI settings, off by default. No key is ever stored here: the app keeps the key in the macOS Keychain, and this
+/// struct holds only the optional *name* of a fallback environment variable.
 /// Nothing is sent anywhere unless suggestions are on, the OpenAI-compatible provider is picked,
 /// and the user asks for AI suggestions or tests the connection. This file has no network code.
 public struct AISettings: Codable, Equatable, Sendable {
@@ -21,7 +22,7 @@ public struct AISettings: Codable, Equatable, Sendable {
     public static let timeoutRange = 10...120
 
     public init(enabled: Bool = false, provider: Provider = .rules, baseURL: String = "http://127.0.0.1:1234/v1",
-                model: String = "", keyEnv: String = "OPENROUTER_API_KEY", timeoutSeconds: Int = AISettings.defaultTimeout) {
+                model: String = "", keyEnv: String = "", timeoutSeconds: Int = AISettings.defaultTimeout) {
         self.enabled = enabled
         self.provider = provider
         self.baseURL = baseURL
@@ -49,7 +50,7 @@ public struct AISettings: Codable, Equatable, Sendable {
         public var errorDescription: String? {
             switch self {
             case .invalidEnvName: "Enter the name of an environment variable, such as OPENROUTER_API_KEY (letters, digits and _)."
-            case .looksLikeKeyValue: "That looks like an API key. MacSweep stores only the variable name, never the key itself."
+            case .looksLikeKeyValue: "That looks like an API key. Paste keys into the API key field, which saves them in the Keychain; this field takes only a variable name."
             case .invalidEndpoint: "The base URL must be http or https, with a host and no user name, password or query."
             case .modelTooLong: "The model name is too long (120 characters at most)."
             }

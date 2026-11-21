@@ -108,7 +108,7 @@ final class AIClientTests: XCTestCase {
         XCTAssertEqual(report.modelCount, 3)
         XCTAssertEqual(report.modelFound, true)
         XCTAssertFalse(report.keyFound)
-        XCTAssertTrue(report.message.contains("TEST_AI_KEY is not set"))
+        XCTAssertTrue(report.message.contains("no key saved"), report.message)
         let ids = try await client.models()
         XCTAssertEqual(ids, ["a/model", "b/model", "test/model"])
         XCTAssertEqual(stub.requests.map(\.httpMethod), ["GET", "GET"])
